@@ -1,0 +1,8 @@
+Intentionally empty.
+
+Vercel needs an output directory for static assets. Pointing it at the project
+root ("." ) made Vercel publish the source tree — including api/index.js, which
+was then served as plain text instead of being built into a serverless function.
+
+An empty directory gives Vercel somewhere harmless to point, leaving api/ to be
+detected as a function.

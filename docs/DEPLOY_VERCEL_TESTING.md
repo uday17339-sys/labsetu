@@ -281,6 +281,19 @@ overriding — clear the field so it falls back to `vercel.json`.
 Do **not** solve this by dropping `NODE_ENV=production`. The API needs it at runtime for HSTS
 and the strict CSP.
 
+**The browser shows your JavaScript source instead of running it**
+`outputDirectory` was pointing at the project root, so Vercel published the source tree as a
+static site and served `api/index.js` as text. It must point at a directory containing only
+static assets — `apps/api/public/` exists and is empty for exactly this reason:
+
+```json
+"outputDirectory": "public",
+"rewrites": [{ "source": "/(.*)", "destination": "/api" }]
+```
+
+`api/index.js` maps to the route `/api` by the index convention, and a Vercel rewrite
+preserves the original request path in `req.url`, so Express still sees `/v1/ready`.
+
 **`Nest can't resolve dependencies of the …`**
 The handler compiled your TypeScript with esbuild instead of using `dist/`. Confirm
 `apps/api/api/index.js` is `.js`, not `.ts`, and that the build ran `nest build` — check the
