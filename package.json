@@ -1,0 +1,60 @@
+{
+  "name": "labsetu",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LabSetu \u2014 an India-first, audit-grade Laboratory Information Management System",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "infra:reset": "docker compose down -v && docker compose up -d",
+    "db:generate": "npm run generate -w @labsetu/db",
+    "db:migrate": "npm run migrate -w @labsetu/db",
+    "db:seed": "npm run seed -w @labsetu/db",
+    "db:studio": "npm run studio -w @labsetu/db",
+    "db:reset": "npm run reset -w @labsetu/db",
+    "build": "npm run build -w @labsetu/contracts && npm run build -w @labsetu/db && npm run build -w @labsetu/api && npm run build -w @labsetu/gateway && npm run build -w @labsetu/web",
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev -w @labsetu/api\" \"npm run dev -w @labsetu/web\"",
+    "dev:api": "npm run dev -w @labsetu/api",
+    "dev:web": "npm run dev -w @labsetu/web",
+    "dev:gateway": "npm run dev -w @labsetu/gateway",
+    "test": "npm run test -w @labsetu/api",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "bootstrap": "npm install && npm run db:generate && npm run build -w @labsetu/contracts",
+    "prod:env": "node scripts/setup-prod-env.mjs",
+    "prod:up": "docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build",
+    "prod:down": "docker compose -f docker-compose.prod.yml --env-file .env.production down",
+    "prod:logs": "docker compose -f docker-compose.prod.yml --env-file .env.production logs -f",
+    "prod:ps": "docker compose -f docker-compose.prod.yml --env-file .env.production ps",
+    "verify": "node scripts/verify-all.mjs",
+    "audit:trace": "node scripts/traceability.mjs",
+    "db:sync-roles": "npm run sync-roles -w @labsetu/db",
+    "db:seed-inventory": "npm run seed-inventory -w @labsetu/db",
+    "db:clean-tests": "dotenv -e .env -- node packages/db/scripts/clean-test-artifacts.mjs",
+    "db:demo-closeout": "dotenv -e .env -- node packages/db/scripts/seed-demo-closeout.mjs",
+    "verify:admin": "node scripts/admin-verify.mjs",
+    "walkthrough": "node scripts/owner-walkthrough.mjs",
+    "db:seed-pharma": "dotenv -e .env -- node packages/db/scripts/seed-pharma.mjs",
+    "verify:pharma": "node scripts/pharma-verify.mjs",
+    "audit:features": "node scripts/feature-audit.mjs",
+    "vercel:build:api": "prisma generate --schema packages/db/prisma/schema.prisma && npm run build -w @labsetu/contracts && npm run build -w @labsetu/crypto && npm run build -w @labsetu/db && tsc -p apps/api/tsconfig.json",
+    "vercel:build:web": "prisma generate --schema packages/db/prisma/schema.prisma && npm run build -w @labsetu/contracts && npm run build -w @labsetu/crypto && npm run build -w @labsetu/db && npm run build -w @labsetu/web",
+    "setup:neon": "node scripts/setup-neon.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^9.1.2",
+    "docx": "^9.7.1",
+    "playwright": "^1.62.1",
+    "typescript": "^5.7.2"
+  }
+}

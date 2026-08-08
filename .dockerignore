@@ -1,0 +1,31 @@
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/build
+**/*.tsbuildinfo
+
+# Secrets must never enter an image layer — they would be recoverable from the
+# image history even after a later RUN deletes them.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.local
+secrets/
+*.pem
+*.key
+
+.git
+.github
+.vscode
+.idea
+
+# Gateway local state can contain patient results.
+apps/gateway/data
+apps/gateway/outbox
+**/*.sqlite
+
+coverage
+*.log
+.docker-data

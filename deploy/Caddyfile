@@ -1,0 +1,56 @@
+# =============================================================================
+# LabSetu edge configuration.
+#
+# Caddy obtains and renews TLS certificates automatically when PUBLIC_HOST is a
+# real domain resolving to this machine. Set PUBLIC_HOST=:80 to run plain HTTP
+# locally (no certificate is attempted).
+# =============================================================================
+
+{$PUBLIC_HOST} {
+	encode zstd gzip
+
+	# --- security headers ----------------------------------------------------
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "strict-origin-when-cross-origin"
+		Permissions-Policy        "camera=(self), microphone=(), geolocation=(), payment=()"
+		# A LIMS must never be indexed.
+		X-Robots-Tag              "noindex, nofollow, noarchive"
+		-Server
+	}
+
+	# --- API -----------------------------------------------------------------
+	# Exposed under /api so the browser and the server share one origin. That
+	# removes cross-origin cookie handling entirely, which is the usual source
+	# of "works locally, breaks in production" session bugs.
+	handle_path /api/* {
+		reverse_proxy api:4000 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	# --- web -----------------------------------------------------------------
+	handle {
+		reverse_proxy web:3000 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	# Patient data must not sit in an intermediary cache.
+	@app not path /_next/static/*
+	header @app Cache-Control "no-store, max-age=0, must-revalidate"
+
+	log {
+		output stdout
+		format json
+		# Request URLs can contain accession numbers; keep them out of edge logs
+		# that may ship to a third party.
+		level INFO
+	}
+}

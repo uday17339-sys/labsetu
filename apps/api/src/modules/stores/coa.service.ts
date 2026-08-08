@@ -1,0 +1,194 @@
+import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+import { PrismaService } from '../../common/prisma/prisma.service';
+import { AuditService } from '../../common/audit/audit.service';
+import { QaService } from './qa.service';
+import { RequestContextStore } from '../../common/context/request-context';
+
+/**
+ * The certificate of analysis.
+ *
+ * What leaves the site with the material: the specification, the result against
+ * each criterion, and a statement that the batch was released. It can only be
+ * issued for a batch QA has actually approved — a CoA for quarantined or
+ * rejected material is a document that should not exist, and the commonest way
+ * one gets created is a well-meaning shortcut on a Friday afternoon.
+ *
+ * Certificates are append-only at the database grant level. A correction is a
+ * new version; the original is never rewritten, because a customer already has
+ * a copy of it.
+ */
+@Injectable()
+export class CoaService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+    private readonly qa: QaService,
+  ) {}
+
+  async issue(batchId: string) {
+    const ctx = RequestContextStore.require();
+    const tx = this.prisma.tx;
+
+    const batch = await tx.materialBatch.findUnique({
+      where: { id: batchId },
+      include: { material: true, goodsReceipt: true },
+    });
+    if (!batch) throw new NotFoundException('Batch not found');
+
+    if (batch.status !== 'APPROVED') {
+      throw new BadRequestException(
+        `A certificate of analysis can only be issued for a released batch. ` +
+          `Batch ${batch.batchNumber} is ${batch.status.toLowerCase().replace(/_/g, ' ')}.`,
+      );
+    }
+
+    const review = await this.qa.reviewBatch(batchId);
+    if (!review.specification) {
+      throw new BadRequestException(
+        'No specification governs this batch, so there is nothing to certify against.',
+      );
+    }
+
+    const existing = await tx.certificateOfAnalysis.findFirst({
+      where: { batchId },
+      orderBy: { version: 'desc' },
+    });
+    const version = existing ? existing.version + 1 : 1;
+
+    const count = await tx.certificateOfAnalysis.count();
+    const coaNumber = existing
+      ? existing.coaNumber
+      : `COA${new Date().toISOString().slice(2, 10).replace(/-/g, '')}${String(count + 1).padStart(
+          4,
+          '0',
+        )}`;
+
+    // The hash covers exactly what the certificate asserts, so a reissue that
+    // changes nothing is detectable as such.
+    const contentHash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          batchNumber: batch.batchNumber,
+          material: batch.material.code,
+          specification: `${review.specification.code}v${review.specification.version}`,
+          results: review.assessment.map((a) => `${a.analyte.code}=${a.value ?? ''}:${a.verdict}`),
+        }),
+      )
+      .digest('hex');
+
+    const coa = await tx.certificateOfAnalysis.create({
+      data: {
+        tenantId: ctx.tenantId!,
+        batchId,
+        coaNumber,
+        version,
+        specificationId: review.specification.id,
+        issuedBy: ctx.userId!,
+        contentHash,
+      },
+    });
+
+    await this.audit.record(tx, {
+      action: 'RELEASE',
+      entityType: 'CertificateOfAnalysis',
+      entityId: coa.id,
+      after: {
+        coaNumber,
+        version,
+        material: batch.material.code,
+        batchNumber: batch.batchNumber,
+        specification: `${review.specification.code} v${review.specification.version}`,
+        criteria: review.summary.criteria,
+        passed: review.summary.passed,
+        contentHash,
+      },
+    });
+
+    return {
+      id: coa.id,
+      coaNumber,
+      version,
+      batchNumber: batch.batchNumber,
+      material: batch.material.name,
+      issuedAt: coa.issuedAt.toISOString(),
+      contentHash,
+    };
+  }
+
+  /** The printable certificate. */
+  async findOne(id: string) {
+    const tx = this.prisma.tx;
+
+    const coa = await tx.certificateOfAnalysis.findUnique({
+      where: { id },
+      include: {
+        batch: { include: { material: true, goodsReceipt: true } },
+        specification: true,
+      },
+    });
+    if (!coa) throw new NotFoundException('Certificate not found');
+
+    const ctx = RequestContextStore.require();
+    const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: ctx.tenantId! } });
+    const review = await this.qa.reviewBatch(coa.batchId);
+    const disposition = await tx.batchDisposition.findFirst({
+      where: { batchId: coa.batchId },
+      orderBy: { decidedAt: 'desc' },
+    });
+
+    return {
+      id: coa.id,
+      coaNumber: coa.coaNumber,
+      version: coa.version,
+      issuedAt: coa.issuedAt.toISOString(),
+      contentHash: coa.contentHash,
+      issuer: {
+        legalName: tenant.legalName ?? tenant.name,
+        gstin: tenant.gstin,
+      },
+      material: {
+        code: coa.batch.material.code,
+        name: coa.batch.material.name,
+        type: coa.batch.material.type,
+        pharmacopoeia: coa.batch.material.pharmacopoeia,
+      },
+      batch: {
+        batchNumber: coa.batch.batchNumber,
+        manufacturerLot: coa.batch.manufacturerLot,
+        quantityReceived: coa.batch.quantityReceived.toNumber(),
+        unit: coa.batch.unit,
+        manufacturedAt: coa.batch.manufacturedAt?.toISOString().slice(0, 10) ?? null,
+        expiryDate: coa.batch.expiryDate?.toISOString().slice(0, 10) ?? null,
+        retestDate: coa.batch.retestDate?.toISOString().slice(0, 10) ?? null,
+        supplier: coa.batch.goodsReceipt?.supplierName ?? null,
+      },
+      specification: {
+        code: coa.specification.code,
+        version: coa.specification.version,
+        basis: coa.specification.basis,
+      },
+      results: review.assessment.map((a) => ({
+        parameter: a.analyte.name,
+        code: a.analyte.code,
+        criterion: a.criterion,
+        result: a.value ?? '—',
+        unit: 'unit' in a ? (a.unit ?? null) : null,
+        verdict: a.verdict,
+        isCritical: a.isCritical,
+      })),
+      disposition: disposition
+        ? {
+            decision: disposition.decision,
+            rationale: disposition.rationale,
+            deviationRef: disposition.deviationRef,
+            decidedAt: disposition.decidedAt.toISOString(),
+          }
+        : null,
+      conclusion:
+        review.summary.failed === 0
+          ? 'The batch complies with the specification stated above.'
+          : 'The batch was released against a documented deviation. See the disposition below.',
+    };
+  }
+}

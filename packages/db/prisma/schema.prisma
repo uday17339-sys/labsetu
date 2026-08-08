@@ -1,0 +1,2186 @@
+// =============================================================================
+// LabSetu — data model
+//
+// Read docs/DATA_MODEL.md alongside this file; it explains the reasoning.
+//
+// Conventions:
+//   * Every tenant-owned table carries `tenantId` — the RLS boundary (ADR 0002).
+//   * `labId` is an operational dimension (branch), NOT a security boundary.
+//   * `*Enc` columns are AES-256-GCM ciphertext; `*Idx` are keyed blind indexes
+//     for exact-match lookup without decryption (ADR 0005).
+//   * Catalog rows are versioned and effectively immutable — a result reported in
+//     March must still render with March's reference range.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  // `native` covers local development and the Docker image. The RHEL target is
+  // for serverless hosts (Vercel, AWS Lambda) which run Amazon Linux — without
+  // it the query engine is missing at runtime and every request fails with
+  // "Query engine library for current platform could not be found".
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Runtime connection: role WITHOUT BYPASSRLS. Tenant isolation depends on it.
+  url       = env("DATABASE_URL")
+  // Migrations run as the owner role. Separating these means the runtime role
+  // can never alter a table or drop an RLS policy — separation of duties in the
+  // database itself, not just in process.
+  directUrl = env("DATABASE_ADMIN_URL")
+}
+
+// =============================================================================
+// PLATFORM
+// =============================================================================
+
+model Tenant {
+  id             String       @id @default(uuid()) @db.Uuid
+  /// Short code used in accession numbers and subdomains.
+  code           String       @unique
+  name           String
+  legalName      String?
+  gstin          String?
+  pan            String?
+  addressLine1   String?
+  addressLine2   String?
+  city           String?
+  state          String?
+  stateCode      String? // GST state code — drives CGST/SGST vs IGST
+  pincode        String?
+  phone          String?
+  email          String?
+  logoKey        String? // S3 key for report letterhead
+  /// NABL / accreditation identifiers printed on reports.
+  nablCertNo     String?
+  nablValidTill  DateTime?
+  locale         String       @default("en")
+  timezone       String       @default("Asia/Kolkata")
+  status         TenantStatus @default(ACTIVE)
+  /// Wrapped tenant data-encryption key. The unwrapping key lives in KMS.
+  dataKeyEnc     String?
+  dataKeyVersion Int          @default(1)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  labs     Lab[]
+  users    User[]
+  policies TenantPolicy[]
+
+  @@map("tenant")
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+/// Per-tenant configuration. Changing a policy is itself an audited event —
+/// "who turned off four-eyes verification, and when" is an audit question.
+model TenantPolicy {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+  updatedBy String?  @db.Uuid
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, key])
+  @@map("tenant_policy")
+}
+
+/// A physical site/branch. Multi-location chains are a named target segment,
+/// so this exists from day one rather than being retrofitted.
+model Lab {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+  /// Prefix in accession numbers, e.g. "HYD".
+  code         String
+  name         String
+  addressLine1 String?
+  city         String?
+  state        String?
+  pincode      String?
+  phone        String?
+  email        String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant    Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userRoles UserRole[]
+  orders    LabOrder[]
+  samples   Sample[]
+  devices   Device[]
+  counters  AccessionCounter[]
+  invoices  Invoice[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("lab")
+}
+
+model User {
+  id                 String     @id @default(uuid()) @db.Uuid
+  tenantId           String     @db.Uuid
+  email              String
+  /// Argon2id. Never logged, never returned by any API.
+  passwordHash       String
+  fullName           String
+  /// Printed on reports next to the signature, e.g. "MD Pathology".
+  qualification      String?
+  /// Medical council registration — NABL expects this on authorised reports.
+  registrationNo     String?
+  phone              String?
+  signatureKey       String? // S3 key for the scanned signature image on reports
+  status             UserStatus @default(ACTIVE)
+  isMfaEnabled       Boolean    @default(false)
+  /// AES-256-GCM ciphertext of the TOTP secret.
+  mfaSecretEnc       String?
+  /// Hashed single-use recovery codes.
+  mfaRecoveryCodes   String[]   @default([])
+  /// Bumped on password/role change or admin revocation — invalidates
+  /// outstanding access tokens without maintaining a blocklist.
+  tokenVersion       Int        @default(0)
+  failedLoginCount   Int        @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  passwordChangedAt  DateTime   @default(now())
+  mustChangePassword Boolean    @default(false)
+  locale             String     @default("en")
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  createdBy          String?    @db.Uuid
+
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  roles         UserRole[]
+  competencies  UserCompetency[]
+  refreshTokens RefreshToken[]
+  signatures    Signature[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("user")
+}
+
+enum UserStatus {
+  ACTIVE
+  /// Users are deactivated, never deleted — a signature must remain
+  /// attributable to a real individual forever.
+  INACTIVE
+  LOCKED
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @db.Uuid
+  code        String
+  name        String
+  description String?
+  /// Explicit permission strings, e.g. "result:authorize". A route with no
+  /// declared permission is denied by default.
+  permissions String[] @default([])
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  userRoles UserRole[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("role")
+}
+
+model UserRole {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  userId    String   @db.Uuid
+  roleId    String   @db.Uuid
+  /// Null = the role applies across every branch of the tenant.
+  labId     String?  @db.Uuid
+  grantedAt DateTime @default(now())
+  grantedBy String?  @db.Uuid
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  lab  Lab? @relation(fields: [labId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId, labId])
+  @@index([tenantId])
+  @@map("user_role")
+}
+
+/// ISO 15189 / NABL: only personnel authorised for a given test may perform or
+/// verify it. Enforced in the result service, not merely recorded.
+model UserCompetency {
+  id               String          @id @default(uuid()) @db.Uuid
+  tenantId         String          @db.Uuid
+  userId           String          @db.Uuid
+  testDefinitionId String          @db.Uuid
+  level            CompetencyLevel
+  validFrom        DateTime
+  validUntil       DateTime?
+  grantedBy        String          @db.Uuid
+  evidenceNote     String?
+  revokedAt        DateTime?
+  revokedBy        String?         @db.Uuid
+  createdAt        DateTime        @default(now())
+
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  testDefinition TestDefinition @relation(fields: [testDefinitionId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@index([tenantId, testDefinitionId])
+  @@map("user_competency")
+}
+
+enum CompetencyLevel {
+  /// May enter results.
+  PERFORM
+  /// May technically verify.
+  VERIFY
+  /// May medically authorise for release.
+  AUTHORIZE
+}
+
+model RefreshToken {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @db.Uuid
+  userId        String    @db.Uuid
+  /// SHA-256 of the token. The plaintext is never stored.
+  tokenHash     String    @unique
+  /// Rotation lineage. Presenting an already-rotated token is treated as theft
+  /// and revokes the entire family.
+  familyId      String    @db.Uuid
+  parentId      String?   @db.Uuid
+  issuedAt      DateTime  @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+  ip            String?
+  userAgent     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+  @@index([familyId])
+  @@map("refresh_token")
+}
+
+// =============================================================================
+// AUDIT & SIGNATURES  —  see ADR 0003
+// =============================================================================
+
+/// Append-only. The application role holds INSERT and SELECT only; UPDATE and
+/// DELETE are revoked at the database level (packages/db/sql/security.sql).
+/// `occurredAt` is assigned by the database and is not application-writable —
+/// this is what makes backdating impossible rather than merely discouraged.
+model AuditLog {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @db.Uuid
+  /// Per-tenant monotonic ordinal. A gap means an entry was removed.
+  seq            BigInt
+  occurredAt     DateTime @default(now())
+  actorUserId    String?  @db.Uuid
+  actorDisplay   String?
+  /// Role held at the time of the action — roles change, the record must not.
+  actorRole      String?
+  actorIp        String?
+  actorUserAgent String?
+  requestId      String?
+  /// Set for gateway-originated actions instead of actorUserId.
+  actorDeviceId  String?  @db.Uuid
+  entityType     String
+  entityId       String?
+  action         String
+  /// Mandatory for any change to already-released or authorised data.
+  reason         String?
+  before         Json?
+  after          Json?
+  changedFields  String[] @default([])
+  /// Hash of the previous entry in this tenant's chain.
+  prevHash       String
+  /// SHA-256 over prevHash ‖ canonical_json(this entry).
+  hash           String
+
+  signatures Signature[]
+
+  @@unique([tenantId, seq])
+  @@index([tenantId, entityType, entityId, occurredAt(sort: Desc)])
+  @@index([tenantId, occurredAt(sort: Desc)])
+  @@index([tenantId, actorUserId, occurredAt(sort: Desc)])
+  @@map("audit_log")
+}
+
+/// Current head of each tenant's audit chain. Separated from `audit_log` so the
+/// head row can be locked FOR UPDATE (serialising chain appends) while the log
+/// itself keeps insert-only grants.
+model AuditChainHead {
+  tenantId  String   @id @db.Uuid
+  seq       BigInt   @default(0)
+  headHash  String
+  updatedAt DateTime @updatedAt
+
+  @@map("audit_chain_head")
+}
+
+/// Record of a chain verification run. This evidence is what a lab shows an
+/// assessor — it is worth more at an inspection than the chain itself.
+model AuditVerification {
+  id             String             @id @default(uuid()) @db.Uuid
+  tenantId       String             @db.Uuid
+  startedAt      DateTime           @default(now())
+  completedAt    DateTime?
+  fromSeq        BigInt
+  toSeq          BigInt
+  entriesChecked BigInt             @default(0)
+  status         VerificationStatus @default(RUNNING)
+  failureDetail  String?
+  /// S3 key of the anchored chain head, when anchoring is enabled.
+  anchorKey      String?
+
+  @@index([tenantId, startedAt(sort: Desc)])
+  @@map("audit_verification")
+}
+
+enum VerificationStatus {
+  RUNNING
+  PASSED
+  FAILED
+}
+
+/// Immutable. Signing always requires re-authentication (password + TOTP) even
+/// with an active session — see COMPLIANCE.md §4.
+model Signature {
+  id          String           @id @default(uuid()) @db.Uuid
+  tenantId    String           @db.Uuid
+  userId      String           @db.Uuid
+  entityType  String
+  entityId    String
+  meaning     SignatureMeaning
+  /// SHA-256 of the exact payload signed. Proves *what* was signed, so a later
+  /// edit is detectable.
+  contentHash String
+  method      SignatureMethod  @default(PASSWORD_TOTP)
+  reason      String?
+  signedAt    DateTime         @default(now())
+  ip          String?
+  userAgent   String?
+  auditLogId  String?          @db.Uuid
+
+  user     User      @relation(fields: [userId], references: [id])
+  auditLog AuditLog? @relation(fields: [auditLogId], references: [id])
+
+  @@index([tenantId, entityType, entityId])
+  @@index([tenantId, userId])
+  @@map("signature")
+}
+
+enum SignatureMeaning {
+  REVIEWED
+  APPROVED
+  AUTHORIZED
+  REJECTED
+  AMENDED
+  QC_OVERRIDE
+}
+
+enum SignatureMethod {
+  PASSWORD_TOTP
+  PASSWORD_ONLY
+}
+
+model Attachment {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @db.Uuid
+  entityType  String
+  entityId    String
+  fileName    String
+  contentType String
+  sizeBytes   Int
+  storageKey  String
+  /// SHA-256 of the stored object — detects silent corruption or substitution.
+  checksum    String
+  uploadedBy  String?  @db.Uuid
+  uploadedAt  DateTime @default(now())
+
+  @@index([tenantId, entityType, entityId])
+  @@map("attachment")
+}
+
+/// DPDP consent, per patient per purpose.
+model ConsentRecord {
+  id            String         @id @default(uuid()) @db.Uuid
+  tenantId      String         @db.Uuid
+  patientId     String         @db.Uuid
+  purpose       ConsentPurpose
+  granted       Boolean
+  /// Version of the notice actually shown, so we can prove what was consented to.
+  noticeVersion String
+  noticeLocale  String         @default("en")
+  channel       String?
+  grantedAt     DateTime?
+  withdrawnAt   DateTime?
+  createdAt     DateTime       @default(now())
+
+  patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, patientId])
+  @@map("consent_record")
+}
+
+enum ConsentPurpose {
+  DIAGNOSTIC_SERVICE
+  REPORT_DELIVERY
+  BILLING
+  STATUTORY_REPORTING
+  RESEARCH_ANONYMISED
+  MARKETING
+}
+
+// =============================================================================
+// CATALOG  —  versioned reference data
+// =============================================================================
+
+model Analyte {
+  id            String           @id @default(uuid()) @db.Uuid
+  tenantId      String           @db.Uuid
+  code          String
+  name          String
+  /// LOINC where known — the path to FHIR/ABDM interoperability later.
+  loincCode     String?
+  valueType     AnalyteValueType @default(NUMERIC)
+  defaultUnit   String?
+  /// Decimal places for display and rounding in reports.
+  precision     Int              @default(2)
+  /// Ordered options for QUALITATIVE / SELECT analytes.
+  allowedValues String[]         @default([])
+  isActive      Boolean          @default(true)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  testAnalytes    TestAnalyte[]
+  referenceRanges ReferenceRange[]
+  results         Result[]
+  qcLotAnalytes   QcLotAnalyte[]
+  qcResults       QcResult[]
+  deviceChannels  DeviceChannel[]
+  specLimits      SpecLimit[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("analyte")
+}
+
+enum AnalyteValueType {
+  NUMERIC
+  /// Free text, e.g. microscopy description.
+  TEXT
+  /// One of `allowedValues`, e.g. Positive / Negative.
+  QUALITATIVE
+  /// Titre or ratio, e.g. "1:160".
+  TITRE
+  /// Numeric with an operator, e.g. "<0.01", ">1000". Instruments emit these
+  /// constantly; coercing them to a number destroys information.
+  NUMERIC_BOUNDED
+}
+
+model Method {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  code      String
+  name      String
+  principle String?
+  /// Reference to the SOP document governing this method.
+  sopRef    String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  testDefinitions TestDefinition[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("method")
+}
+
+model SpecimenType {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @db.Uuid
+  code     String
+  name     String
+  isActive Boolean @default(true)
+
+  testDefinitions TestDefinition[]
+  samples         Sample[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("specimen_type")
+}
+
+model ContainerType {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @db.Uuid
+  code     String
+  name     String
+  /// Cap colour helps bench staff far more than the container's formal name.
+  colour   String?
+  additive String?
+  isActive Boolean @default(true)
+
+  testDefinitions TestDefinition[]
+  samples         Sample[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("container_type")
+}
+
+/// Rejection reasons are a controlled list, not free text — rejection rate by
+/// reason is an NABL quality indicator and must be aggregatable.
+model RejectionReason {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @db.Uuid
+  code     String
+  name     String
+  category String?
+  isActive Boolean @default(true)
+
+  samples     Sample[]
+  sampleTests SampleTest[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("rejection_reason")
+}
+
+model TestDefinition {
+  id                   String        @id @default(uuid()) @db.Uuid
+  tenantId             String        @db.Uuid
+  code                 String
+  name                 String
+  shortName            String?
+  department           LabDepartment @default(BIOCHEMISTRY)
+  /// Incremented on any clinically-significant change. Operational rows
+  /// reference the version in force at the time, so history renders correctly.
+  version              Int           @default(1)
+  methodId             String?       @db.Uuid
+  specimenTypeId       String?       @db.Uuid
+  containerTypeId      String?       @db.Uuid
+  /// Minimum volume in mL — drives sample-adequacy checks at accessioning.
+  minVolumeMl          Decimal?      @db.Decimal(6, 2)
+  /// Expected turnaround in minutes; the basis of TAT breach reporting.
+  tatMinutes           Int?
+  /// Test-level price before GST.
+  price                Decimal       @default(0) @db.Decimal(10, 2)
+  /// SAC code for GST invoicing.
+  sacCode              String?
+  /// Whether a technical verification step is required before authorisation.
+  requiresVerification Boolean       @default(true)
+  /// Fasting, special handling, patient prep — printed on the requisition.
+  instructions         String?
+  isOutsourced         Boolean       @default(false)
+  isActive             Boolean       @default(true)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  method         Method?            @relation(fields: [methodId], references: [id])
+  specimenType   SpecimenType?      @relation(fields: [specimenTypeId], references: [id])
+  containerType  ContainerType?     @relation(fields: [containerTypeId], references: [id])
+  analytes       TestAnalyte[]
+  panelItems     PanelItem[]
+  orderItems     OrderItem[]
+  sampleTests    SampleTest[]
+  competencies   UserCompetency[]
+  deviceChannels DeviceChannel[]
+  reagentUsages  TestReagentUsage[]
+  specLimits     SpecLimit[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, department])
+  @@map("test_definition")
+}
+
+enum LabDepartment {
+  BIOCHEMISTRY
+  HAEMATOLOGY
+  MICROBIOLOGY
+  SEROLOGY
+  IMMUNOLOGY
+  CLINICAL_PATHOLOGY
+  HISTOPATHOLOGY
+  CYTOLOGY
+  MOLECULAR
+  RADIOLOGY
+  OTHER
+}
+
+model TestAnalyte {
+  id               String  @id @default(uuid()) @db.Uuid
+  tenantId         String  @db.Uuid
+  testDefinitionId String  @db.Uuid
+  analyteId        String  @db.Uuid
+  /// Display order on the report.
+  sortOrder        Int     @default(0)
+  /// Analyte is calculated from others (e.g. LDL by Friedewald) rather than
+  /// measured. Formula is evaluated after the source analytes resolve.
+  formula          String?
+  isMandatory      Boolean @default(true)
+
+  testDefinition TestDefinition @relation(fields: [testDefinitionId], references: [id], onDelete: Cascade)
+  analyte        Analyte        @relation(fields: [analyteId], references: [id], onDelete: Cascade)
+
+  @@unique([testDefinitionId, analyteId])
+  @@index([tenantId])
+  @@map("test_analyte")
+}
+
+model Panel {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  code      String
+  name      String
+  /// Bundled price; usually less than the sum of its tests.
+  price     Decimal  @default(0) @db.Decimal(10, 2)
+  sacCode   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items      PanelItem[]
+  orderItems OrderItem[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("panel")
+}
+
+model PanelItem {
+  id               String @id @default(uuid()) @db.Uuid
+  tenantId         String @db.Uuid
+  panelId          String @db.Uuid
+  testDefinitionId String @db.Uuid
+  sortOrder        Int    @default(0)
+
+  panel          Panel          @relation(fields: [panelId], references: [id], onDelete: Cascade)
+  testDefinition TestDefinition @relation(fields: [testDefinitionId], references: [id], onDelete: Cascade)
+
+  @@unique([panelId, testDefinitionId])
+  @@index([tenantId])
+  @@map("panel_item")
+}
+
+/// Selected by patient age and sex at the time of reporting. Superseded ranges
+/// are closed with `effectiveTo` rather than edited, so a historical report
+/// still renders with the range that was in force when it was issued.
+model ReferenceRange {
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @db.Uuid
+  analyteId     String    @db.Uuid
+  sex           Sex? // null = any
+  minAgeDays    Int?
+  maxAgeDays    Int?
+  /// Special populations, e.g. "PREGNANCY_T1". Null = general.
+  condition     String?
+  lowValue      Decimal?  @db.Decimal(18, 6)
+  highValue     Decimal?  @db.Decimal(18, 6)
+  /// Rendered text when the range is not a simple numeric interval.
+  displayText   String?
+  unit          String?
+  /// Below/above these, the result is a critical value requiring immediate
+  /// notification to the clinician — an NABL requirement with a logged callback.
+  criticalLow   Decimal?  @db.Decimal(18, 6)
+  criticalHigh  Decimal?  @db.Decimal(18, 6)
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+  createdAt     DateTime  @default(now())
+
+  analyte Analyte @relation(fields: [analyteId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, analyteId, effectiveFrom])
+  @@map("reference_range")
+}
+
+enum Sex {
+  MALE
+  FEMALE
+  OTHER
+  UNKNOWN
+}
+
+// =============================================================================
+// OPERATIONS
+// =============================================================================
+
+/// Identifiers are encrypted per patient (ADR 0005). Non-identifying clinical
+/// attributes stay plaintext because reference-range selection needs them at
+/// query time.
+model Patient {
+  id          String @id @default(uuid()) @db.Uuid
+  tenantId    String @db.Uuid
+  /// Human-readable lab-assigned patient identifier (not personal data).
+  patientCode String
+
+  // --- encrypted identifiers + blind indexes -------------------------------
+  nameEnc        String
+  nameIdx        String?
+  phoneEnc       String?
+  phoneIdx       String?
+  emailEnc       String?
+  emailIdx       String?
+  addressEnc     String?
+  /// Aadhaar/ABHA or other government identifier.
+  govIdEnc       String?
+  govIdIdx       String?
+  /// Wrapped per-patient data key. Destroying this is DPDP erasure.
+  dataKeyEnc     String
+  dataKeyVersion Int     @default(1)
+
+  // --- non-identifying clinical attributes ---------------------------------
+  sex         Sex       @default(UNKNOWN)
+  dateOfBirth DateTime? @db.Date
+  /// Used when only an age was given at registration, which is common.
+  ageYears    Int?
+  ageMonths   Int?
+  ageDays     Int?
+  bloodGroup  String?
+
+  /// Set when the data key has been destroyed under a DPDP erasure request.
+  /// The clinical record and audit chain survive, de-identified.
+  erasedAt   DateTime?
+  erasureRef String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?  @db.Uuid
+
+  orders   LabOrder[]
+  samples  Sample[]
+  consents ConsentRecord[]
+
+  @@unique([tenantId, patientCode])
+  @@index([tenantId, nameIdx])
+  @@index([tenantId, phoneIdx])
+  @@index([tenantId, govIdIdx])
+  @@map("patient")
+}
+
+model ReferringDoctor {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @db.Uuid
+  code           String
+  name           String
+  qualification  String?
+  registrationNo String?
+  phone          String?
+  email          String?
+  speciality     String?
+  organizationId String?  @db.Uuid
+  /// Referral commission percentage, where the lab operates such a scheme.
+  commissionPct  Decimal? @db.Decimal(5, 2)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization ReferringOrganization? @relation(fields: [organizationId], references: [id])
+  orders       LabOrder[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("referring_doctor")
+}
+
+model ReferringOrganization {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+  code         String
+  name         String
+  type         String? // hospital, clinic, corporate, collection centre
+  gstin        String?
+  addressLine1 String?
+  city         String?
+  state        String?
+  stateCode    String?
+  pincode      String?
+  phone        String?
+  email        String?
+  /// Negotiated rate card. Null = list price.
+  priceListId  String?  @db.Uuid
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  doctors ReferringDoctor[]
+  orders  LabOrder[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("referring_organization")
+}
+
+/// A requisition. `LabOrder` rather than `Order` because ORDER is a SQL keyword
+/// and the friction of quoting it everywhere is not worth the shorter name.
+model LabOrder {
+  id                   String      @id @default(uuid()) @db.Uuid
+  tenantId             String      @db.Uuid
+  labId                String      @db.Uuid
+  orderNumber          String
+  /// Nullable: in the manufacturing QC flow the subject of an order is a
+  /// material batch, not a patient (DATA_MODEL.md §9). Exactly one of
+  /// `patientId` and `batchId` is set — enforced by a CHECK constraint, because
+  /// an order with neither subject is unresultable and one with both is
+  /// ambiguous about whose reference ranges apply.
+  patientId            String?     @db.Uuid
+  batchId              String?     @db.Uuid
+  referringDoctorId    String?     @db.Uuid
+  referringOrgId       String?     @db.Uuid
+  priority             Priority    @default(ROUTINE)
+  status               OrderStatus @default(OPEN)
+  clinicalNotes        String?
+  /// Free-text provisional diagnosis from the requisition.
+  provisionalDiagnosis String?
+  orderedAt            DateTime    @default(now())
+  completedAt          DateTime?
+  createdBy            String?     @db.Uuid
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+
+  lab             Lab                    @relation(fields: [labId], references: [id])
+  patient         Patient?               @relation(fields: [patientId], references: [id])
+  batch           MaterialBatch?         @relation(fields: [batchId], references: [id])
+  referringDoctor ReferringDoctor?       @relation(fields: [referringDoctorId], references: [id])
+  referringOrg    ReferringOrganization? @relation(fields: [referringOrgId], references: [id])
+  items           OrderItem[]
+  samples         Sample[]
+  reports         Report[]
+  invoices        Invoice[]
+
+  @@unique([tenantId, orderNumber])
+  @@index([tenantId, labId, status])
+  @@index([tenantId, patientId])
+  @@index([tenantId, batchId])
+  @@index([tenantId, orderedAt(sort: Desc)])
+  @@map("lab_order")
+}
+
+enum Priority {
+  ROUTINE
+  URGENT
+  STAT
+}
+
+enum OrderStatus {
+  OPEN
+  PARTIALLY_REPORTED
+  COMPLETED
+  CANCELLED
+}
+
+model OrderItem {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @db.Uuid
+  orderId          String   @db.Uuid
+  /// Exactly one of testDefinitionId / panelId is set.
+  testDefinitionId String?  @db.Uuid
+  panelId          String?  @db.Uuid
+  quantity         Int      @default(1)
+  unitPrice        Decimal  @db.Decimal(10, 2)
+  discountPct      Decimal  @default(0) @db.Decimal(5, 2)
+  /// Price snapshot at order time — the catalog price may change later, but the
+  /// invoice must not.
+  netAmount        Decimal  @db.Decimal(10, 2)
+  createdAt        DateTime @default(now())
+
+  order          LabOrder        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  testDefinition TestDefinition? @relation(fields: [testDefinitionId], references: [id])
+  panel          Panel?          @relation(fields: [panelId], references: [id])
+  sampleTests    SampleTest[]
+
+  @@index([tenantId, orderId])
+  @@map("order_item")
+}
+
+/// The physical specimen. One accession number, one barcode.
+model Sample {
+  id              String       @id @default(uuid()) @db.Uuid
+  tenantId        String       @db.Uuid
+  labId           String       @db.Uuid
+  orderId         String       @db.Uuid
+  /// Gapless per lab per day: {labCode}{YYMMDD}{seq:05d}. Auditors read gaps as
+  /// deleted samples, so the counter is transactional.
+  accessionNumber String
+  barcode         String?
+  /// Nullable by design — in the pharma phase the subject of a sample becomes a
+  /// batch rather than a patient (DATA_MODEL.md §9).
+  patientId       String?      @db.Uuid
+  specimenTypeId  String?      @db.Uuid
+  containerTypeId String?      @db.Uuid
+  volumeMl        Decimal?     @db.Decimal(6, 2)
+  status          SampleStatus @default(REGISTERED)
+  priority        Priority     @default(ROUTINE)
+
+  collectedAt    DateTime?
+  collectedBy    String?   @db.Uuid
+  /// Free text: "left antecubital fossa", "midstream".
+  collectionSite String?
+  receivedAt     DateTime?
+  receivedBy     String?   @db.Uuid
+
+  rejectedAt        DateTime?
+  rejectedBy        String?   @db.Uuid
+  rejectionReasonId String?   @db.Uuid
+  rejectionNote     String?
+
+  /// Storage location for retention / repeat testing.
+  storageLocation String?
+  disposedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?  @db.Uuid
+
+  lab             Lab              @relation(fields: [labId], references: [id])
+  order           LabOrder         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  patient         Patient?         @relation(fields: [patientId], references: [id])
+  specimenType    SpecimenType?    @relation(fields: [specimenTypeId], references: [id])
+  containerType   ContainerType?   @relation(fields: [containerTypeId], references: [id])
+  rejectionReason RejectionReason? @relation(fields: [rejectionReasonId], references: [id])
+  tests           SampleTest[]
+
+  @@unique([tenantId, accessionNumber])
+  @@index([tenantId, labId, status])
+  @@index([tenantId, orderId])
+  @@index([tenantId, barcode])
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@map("sample")
+}
+
+enum SampleStatus {
+  REGISTERED
+  COLLECTED
+  IN_TRANSIT
+  RECEIVED
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+}
+
+/// One test on one sample — the unit of work. Worklists, TAT, competency, QC
+/// association, verification and billing all hang off this row.
+model SampleTest {
+  id               String           @id @default(uuid()) @db.Uuid
+  tenantId         String           @db.Uuid
+  sampleId         String           @db.Uuid
+  orderItemId      String?          @db.Uuid
+  testDefinitionId String           @db.Uuid
+  /// Catalog version in force when this test was ordered.
+  testVersion      Int              @default(1)
+  status           SampleTestStatus @default(PENDING)
+  priority         Priority         @default(ROUTINE)
+  deviceId         String?          @db.Uuid
+
+  startedAt    DateTime?
+  /// Set when results are first entered — the TAT stop-clock candidate.
+  resultAt     DateTime?
+  enteredBy    String?   @db.Uuid
+  verifiedAt   DateTime?
+  verifiedBy   String?   @db.Uuid
+  authorizedAt DateTime?
+  authorizedBy String?   @db.Uuid
+  reportedAt   DateTime?
+
+  /// Due time from the test's TAT; drives the overdue worklist.
+  dueAt       DateTime?
+  rerunCount  Int       @default(0)
+  rerunReason String?
+
+  cancelledAt       DateTime?
+  cancelledBy       String?   @db.Uuid
+  rejectionReasonId String?   @db.Uuid
+  cancellationNote  String?
+
+  /// Interpretive comment printed under the test on the report.
+  interpretation String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sample          Sample           @relation(fields: [sampleId], references: [id], onDelete: Cascade)
+  orderItem       OrderItem?       @relation(fields: [orderItemId], references: [id])
+  testDefinition  TestDefinition   @relation(fields: [testDefinitionId], references: [id])
+  device          Device?          @relation(fields: [deviceId], references: [id])
+  rejectionReason RejectionReason? @relation(fields: [rejectionReasonId], references: [id])
+  results         Result[]
+  reportItems     ReportItem[]
+
+  @@unique([sampleId, testDefinitionId, rerunCount])
+  @@index([tenantId, status])
+  @@index([tenantId, sampleId])
+  @@index([tenantId, status, dueAt])
+  @@index([tenantId, testDefinitionId, status])
+  @@map("sample_test")
+}
+
+enum SampleTestStatus {
+  PENDING
+  IN_PROGRESS
+  RESULT_ENTERED
+  TECH_VERIFIED
+  AUTHORIZED
+  REPORTED
+  RERUN
+  CANCELLED
+}
+
+/// One analyte value. Never updated in place after authorisation — a correction
+/// creates a new row with an incremented `version`, and the previous row is
+/// retained forever.
+model Result {
+  id           String  @id @default(uuid()) @db.Uuid
+  tenantId     String  @db.Uuid
+  sampleTestId String  @db.Uuid
+  analyteId    String  @db.Uuid
+  version      Int     @default(1)
+  isCurrent    Boolean @default(true)
+
+  /// Stored as text because analyzers emit "<0.01", "NEGATIVE", ">1000".
+  /// Coercing at capture would destroy information the lab needs.
+  value        String?
+  /// Parsed numeric form where the value is numeric — for trending and rules.
+  numericValue Decimal? @db.Decimal(18, 6)
+  unit         String?
+
+  /// Snapshot of the reference range applied, so a reprint reproduces exactly
+  /// what the patient originally received.
+  refRangeId String?  @db.Uuid
+  refLow     Decimal? @db.Decimal(18, 6)
+  refHigh    Decimal? @db.Decimal(18, 6)
+  refDisplay String?
+
+  flag               ResultFlag @default(NORMAL)
+  isCritical         Boolean    @default(false)
+  /// Critical values require notification to the clinician, with the callback
+  /// logged — NABL expects evidence of the call, not just the flag.
+  criticalNotifiedAt DateTime?
+  criticalNotifiedBy String?    @db.Uuid
+  criticalNotifiedTo String?
+
+  source              ResultSource @default(MANUAL)
+  deviceId            String?      @db.Uuid
+  /// Links back to the raw instrument payload this value came from.
+  instrumentMessageId String?      @db.Uuid
+
+  /// Delta check against the patient's previous result for this analyte.
+  deltaFlag Boolean  @default(false)
+  deltaPct  Decimal? @db.Decimal(10, 2)
+
+  comment      String?
+  /// Mandatory when correcting a value that was already authorised.
+  changeReason String?
+
+  enteredBy String?  @db.Uuid
+  enteredAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sampleTest        SampleTest         @relation(fields: [sampleTestId], references: [id], onDelete: Cascade)
+  analyte           Analyte            @relation(fields: [analyteId], references: [id])
+  device            Device?            @relation(fields: [deviceId], references: [id])
+  instrumentMessage InstrumentMessage? @relation(fields: [instrumentMessageId], references: [id])
+
+  @@unique([sampleTestId, analyteId, version])
+  @@index([tenantId, sampleTestId])
+  @@index([tenantId, analyteId, enteredAt(sort: Desc)])
+  @@index([tenantId, isCritical, criticalNotifiedAt])
+  @@map("result")
+}
+
+enum ResultFlag {
+  NORMAL
+  LOW
+  HIGH
+  CRITICAL_LOW
+  CRITICAL_HIGH
+  ABNORMAL
+}
+
+enum ResultSource {
+  /// Typed by a human. Visibly marked as such on screen and in the audit trail.
+  MANUAL
+  /// Captured from an analyzer via the gateway.
+  INSTRUMENT
+  /// Derived from other analytes by formula.
+  CALCULATED
+  /// Received from an outsourced/referral lab.
+  EXTERNAL
+}
+
+/// Reports are versioned, never overwritten. An amendment produces version n+1
+/// with a mandatory reason; both remain retrievable forever.
+model Report {
+  id           String       @id @default(uuid()) @db.Uuid
+  tenantId     String       @db.Uuid
+  orderId      String       @db.Uuid
+  reportNumber String
+  version      Int          @default(1)
+  status       ReportStatus @default(DRAFT)
+  /// Partial reports let a lab release completed tests without waiting for the
+  /// slowest one — labs do this constantly.
+  isPartial    Boolean      @default(false)
+
+  /// S3 key of the rendered PDF, stored under Object Lock once released.
+  pdfKey      String?
+  pdfChecksum String?
+
+  authorizedAt DateTime?
+  authorizedBy String?   @db.Uuid
+  releasedAt   DateTime?
+  releasedBy   String?   @db.Uuid
+
+  amendedFromId   String? @db.Uuid
+  /// Mandatory on any amendment.
+  amendmentReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order       LabOrder         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  amendedFrom Report?          @relation("ReportAmendment", fields: [amendedFromId], references: [id])
+  amendments  Report[]         @relation("ReportAmendment")
+  items       ReportItem[]
+  deliveries  ReportDelivery[]
+
+  @@unique([tenantId, reportNumber, version])
+  @@index([tenantId, orderId])
+  @@index([tenantId, status])
+  @@map("report")
+}
+
+enum ReportStatus {
+  DRAFT
+  AUTHORIZED
+  RELEASED
+  AMENDED
+}
+
+model ReportItem {
+  id           String @id @default(uuid()) @db.Uuid
+  tenantId     String @db.Uuid
+  reportId     String @db.Uuid
+  sampleTestId String @db.Uuid
+  sortOrder    Int    @default(0)
+
+  report     Report     @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  sampleTest SampleTest @relation(fields: [sampleTestId], references: [id])
+
+  @@unique([reportId, sampleTestId])
+  @@index([tenantId])
+  @@map("report_item")
+}
+
+model ReportDelivery {
+  id             String          @id @default(uuid()) @db.Uuid
+  tenantId       String          @db.Uuid
+  reportId       String          @db.Uuid
+  channel        DeliveryChannel
+  /// Encrypted — a phone number or email is personal data.
+  destinationEnc String
+  status         DeliveryStatus  @default(QUEUED)
+  attempts       Int             @default(0)
+  providerRef    String?
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  failedAt       DateTime?
+  failureReason  String?
+  /// The consent record relied on for this delivery — DPDP purpose limitation.
+  consentId      String?         @db.Uuid
+  createdAt      DateTime        @default(now())
+
+  report Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, reportId])
+  @@index([tenantId, status])
+  @@map("report_delivery")
+}
+
+enum DeliveryChannel {
+  WHATSAPP
+  EMAIL
+  SMS
+  PORTAL
+  PRINT
+}
+
+enum DeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+  /// Blocked because consent was absent or withdrawn.
+  BLOCKED_NO_CONSENT
+}
+
+// =============================================================================
+// BILLING  —  GST-aware from the start; retrofitting Indian tax is painful
+// =============================================================================
+
+model Invoice {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @db.Uuid
+  labId         String   @db.Uuid
+  orderId       String?  @db.Uuid
+  invoiceNumber String
+  invoiceDate   DateTime @default(now())
+  /// B2C, B2B (registered customer), or EXPORT — decides GST treatment.
+  customerType  String   @default("B2C")
+  customerName  String
+  customerGstin String?
+  /// GST state code of the place of supply. Same state → CGST+SGST,
+  /// different → IGST. Getting this wrong is a compliance problem, not a bug.
+  placeOfSupply String?
+
+  subTotal       Decimal       @db.Decimal(12, 2)
+  discountAmount Decimal       @default(0) @db.Decimal(12, 2)
+  taxableAmount  Decimal       @db.Decimal(12, 2)
+  cgstAmount     Decimal       @default(0) @db.Decimal(12, 2)
+  sgstAmount     Decimal       @default(0) @db.Decimal(12, 2)
+  igstAmount     Decimal       @default(0) @db.Decimal(12, 2)
+  roundOff       Decimal       @default(0) @db.Decimal(6, 2)
+  totalAmount    Decimal       @db.Decimal(12, 2)
+  paidAmount     Decimal       @default(0) @db.Decimal(12, 2)
+  status         InvoiceStatus @default(UNPAID)
+
+  /// IRN/QR from the e-invoice portal, once that integration lands.
+  irn          String?
+  irnQrPayload String?
+
+  cancelledAt  DateTime?
+  cancelReason String?
+  createdBy    String?   @db.Uuid
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  lab      Lab           @relation(fields: [labId], references: [id])
+  order    LabOrder?     @relation(fields: [orderId], references: [id])
+  items    InvoiceItem[]
+  payments Payment[]
+
+  @@unique([tenantId, invoiceNumber])
+  @@index([tenantId, labId, invoiceDate(sort: Desc)])
+  @@index([tenantId, status])
+  @@map("invoice")
+}
+
+enum InvoiceStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+  REFUNDED
+}
+
+model InvoiceItem {
+  id            String  @id @default(uuid()) @db.Uuid
+  tenantId      String  @db.Uuid
+  invoiceId     String  @db.Uuid
+  description   String
+  sacCode       String?
+  quantity      Int     @default(1)
+  unitPrice     Decimal @db.Decimal(10, 2)
+  discountPct   Decimal @default(0) @db.Decimal(5, 2)
+  taxableAmount Decimal @db.Decimal(12, 2)
+  /// Diagnostic services are largely GST-exempt in India; the field exists
+  /// because non-clinical services (corporate packages, consumables) are not.
+  gstRate       Decimal @default(0) @db.Decimal(5, 2)
+  cgstAmount    Decimal @default(0) @db.Decimal(12, 2)
+  sgstAmount    Decimal @default(0) @db.Decimal(12, 2)
+  igstAmount    Decimal @default(0) @db.Decimal(12, 2)
+  lineTotal     Decimal @db.Decimal(12, 2)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, invoiceId])
+  @@map("invoice_item")
+}
+
+model Payment {
+  id         String      @id @default(uuid()) @db.Uuid
+  tenantId   String      @db.Uuid
+  invoiceId  String      @db.Uuid
+  amount     Decimal     @db.Decimal(12, 2)
+  mode       PaymentMode
+  reference  String?
+  paidAt     DateTime    @default(now())
+  receivedBy String?     @db.Uuid
+  createdAt  DateTime    @default(now())
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, invoiceId])
+  @@map("payment")
+}
+
+enum PaymentMode {
+  CASH
+  UPI
+  CARD
+  NETBANKING
+  CHEQUE
+  CREDIT
+  INSURANCE
+}
+
+// =============================================================================
+// QUALITY CONTROL
+// =============================================================================
+
+model QcMaterial {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+  code         String
+  name         String
+  manufacturer String?
+  level        QcLevel
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  lots QcLot[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@map("qc_material")
+}
+
+enum QcLevel {
+  LEVEL_1
+  LEVEL_2
+  LEVEL_3
+}
+
+model QcLot {
+  id           String    @id @default(uuid()) @db.Uuid
+  tenantId     String    @db.Uuid
+  qcMaterialId String    @db.Uuid
+  lotNumber    String
+  expiryDate   DateTime?
+  openedAt     DateTime?
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+
+  material QcMaterial     @relation(fields: [qcMaterialId], references: [id], onDelete: Cascade)
+  analytes QcLotAnalyte[]
+  results  QcResult[]
+
+  @@unique([tenantId, qcMaterialId, lotNumber])
+  @@index([tenantId])
+  @@map("qc_lot")
+}
+
+/// Target mean and SD per analyte per lot. Ideally the lab's own cumulative
+/// values rather than the insert's — hence both are recorded.
+model QcLotAnalyte {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @db.Uuid
+  qcLotId      String   @db.Uuid
+  analyteId    String   @db.Uuid
+  targetMean   Decimal  @db.Decimal(18, 6)
+  targetSd     Decimal  @db.Decimal(18, 6)
+  /// Lab-established values, once enough points exist.
+  observedMean Decimal? @db.Decimal(18, 6)
+  observedSd   Decimal? @db.Decimal(18, 6)
+  unit         String?
+
+  qcLot   QcLot   @relation(fields: [qcLotId], references: [id], onDelete: Cascade)
+  analyte Analyte @relation(fields: [analyteId], references: [id], onDelete: Cascade)
+
+  @@unique([qcLotId, analyteId])
+  @@index([tenantId])
+  @@map("qc_lot_analyte")
+}
+
+model QcResult {
+  id            String       @id @default(uuid()) @db.Uuid
+  tenantId      String       @db.Uuid
+  qcLotId       String       @db.Uuid
+  analyteId     String       @db.Uuid
+  deviceId      String?      @db.Uuid
+  value         Decimal      @db.Decimal(18, 6)
+  /// Standard deviations from target — the Levey-Jennings y-axis.
+  zScore        Decimal?     @db.Decimal(10, 4)
+  status        QcStatus     @default(PASS)
+  /// Which Westgard rules fired, e.g. ["1-3s","2-2s"].
+  violatedRules String[]     @default([])
+  /// Documented corrective action; required to clear a REJECT.
+  actionTaken   String?
+  acceptedBy    String?      @db.Uuid
+  acceptedAt    DateTime?
+  runAt         DateTime     @default(now())
+  enteredBy     String?      @db.Uuid
+  source        ResultSource @default(MANUAL)
+  createdAt     DateTime     @default(now())
+
+  qcLot   QcLot   @relation(fields: [qcLotId], references: [id], onDelete: Cascade)
+  analyte Analyte @relation(fields: [analyteId], references: [id])
+  device  Device? @relation(fields: [deviceId], references: [id])
+
+  @@index([tenantId, analyteId, deviceId, runAt(sort: Desc)])
+  @@index([tenantId, status])
+  @@map("qc_result")
+}
+
+enum QcStatus {
+  PASS
+  WARNING
+  REJECT
+}
+
+// =============================================================================
+// INSTRUMENT INTEGRATION  —  see ADR 0004
+// =============================================================================
+
+model Device {
+  id           String             @id @default(uuid()) @db.Uuid
+  tenantId     String             @db.Uuid
+  labId        String             @db.Uuid
+  code         String
+  name         String
+  manufacturer String?
+  model        String?
+  serialNumber String?
+  department   LabDepartment      @default(BIOCHEMISTRY)
+  protocol     InstrumentProtocol
+  location     String?
+
+  status       DeviceStatus @default(PENDING_ENROLMENT)
+  /// Shadow mode: capture and parse, write nothing. The step that makes
+  /// analyzer onboarding safe to delegate.
+  isShadowMode Boolean      @default(true)
+
+  /// Gateway credentials. `deviceSecretEnc` is AES-GCM ciphertext of the HMAC
+  /// key; the plaintext is shown exactly once at enrolment.
+  deviceKeyHash          String?   @unique
+  deviceSecretEnc        String?
+  enrolmentCode          String?   @unique
+  enrolmentCodeExpiresAt DateTime?
+  enrolledAt             DateTime?
+
+  lastSeenAt               DateTime?
+  lastMessageAt            DateTime?
+  /// A silent analyzer is an alert. "We didn't notice it stopped sending" is
+  /// the failure mode that actually bites labs.
+  heartbeatIntervalSeconds Int       @default(60)
+
+  /// Calibration and maintenance tracking — NABL equipment records.
+  lastCalibratedAt DateTime?
+  calibrationDueAt DateTime?
+  lastServicedAt   DateTime?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lab         Lab                 @relation(fields: [labId], references: [id])
+  channels    DeviceChannel[]
+  messages    InstrumentMessage[]
+  results     Result[]
+  qcResults   QcResult[]
+  sampleTests SampleTest[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, labId])
+  @@map("device")
+}
+
+enum DeviceStatus {
+  PENDING_ENROLMENT
+  ENROLLED
+  ACTIVE
+  DISABLED
+  REVOKED
+}
+
+enum InstrumentProtocol {
+  ASTM_E1394
+  HL7_V2
+  FILE_CSV
+  FILE_XML
+  JSON_HTTP
+}
+
+/// Maps an instrument's own test code to our catalog. Adding an analyzer is
+/// mostly filling in rows here — configuration, not code.
+model DeviceChannel {
+  id                   String   @id @default(uuid()) @db.Uuid
+  tenantId             String   @db.Uuid
+  deviceId             String   @db.Uuid
+  /// The code as the analyzer emits it.
+  instrumentCode       String
+  testDefinitionId     String?  @db.Uuid
+  analyteId            String   @db.Uuid
+  /// Multiply the instrument value to reach our unit, e.g. mg/dL → mmol/L.
+  unitConversionFactor Decimal? @db.Decimal(18, 8)
+  instrumentUnit       String?
+  targetUnit           String?
+  isActive             Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  device         Device          @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  testDefinition TestDefinition? @relation(fields: [testDefinitionId], references: [id])
+  analyte        Analyte         @relation(fields: [analyteId], references: [id])
+
+  @@unique([deviceId, instrumentCode])
+  @@index([tenantId, deviceId])
+  @@map("device_channel")
+}
+
+/// The raw payload, archived verbatim before parsing. If a parser is wrong the
+/// original is still here to reprocess — and an auditor can be shown exactly
+/// what the instrument emitted (ALCOA+ "original").
+model InstrumentMessage {
+  id               String             @id @default(uuid()) @db.Uuid
+  tenantId         String             @db.Uuid
+  deviceId         String             @db.Uuid
+  /// Gateway-generated UUID; the idempotency key. A replayed message is a
+  /// no-op, not a duplicate result.
+  messageId        String
+  protocol         InstrumentProtocol
+  /// Gateway clock — advisory only. Server time is authoritative.
+  capturedAt       DateTime
+  receivedAt       DateTime           @default(now())
+  rawStorageKey    String?
+  rawChecksum      String
+  rawPreview       String?            @db.Text
+  observationCount Int                @default(0)
+  status           IngestStatus       @default(RECEIVED)
+  processedAt      DateTime?
+  errorDetail      String?
+  payload          Json
+
+  device     Device            @relation(fields: [deviceId], references: [id])
+  results    Result[]
+  exceptions IngestException[]
+
+  @@unique([tenantId, messageId])
+  @@index([tenantId, deviceId, receivedAt(sort: Desc)])
+  @@index([tenantId, status])
+  @@map("instrument_message")
+}
+
+enum IngestStatus {
+  RECEIVED
+  PROCESSING
+  PROCESSED
+  /// Partially mapped; some observations went to the exception queue.
+  PARTIAL
+  FAILED
+}
+
+/// The held queue. An unmatched result goes here rather than being dropped or
+/// guessed — a mis-matched result is a patient-safety event, a queue item is an
+/// inconvenience.
+model IngestException {
+  id             String                @id @default(uuid()) @db.Uuid
+  tenantId       String                @db.Uuid
+  messageRowId   String                @db.Uuid
+  reason         IngestExceptionReason
+  detail         String?
+  specimenRef    String?
+  instrumentCode String?
+  rawObservation Json
+  status         ExceptionStatus       @default(OPEN)
+  resolvedAt     DateTime?
+  resolvedBy     String?               @db.Uuid
+  resolutionNote String?
+  createdAt      DateTime              @default(now())
+
+  message InstrumentMessage @relation(fields: [messageRowId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@map("ingest_exception")
+}
+
+enum IngestExceptionReason {
+  UNKNOWN_SPECIMEN
+  UNMAPPED_CHANNEL
+  TEST_NOT_ORDERED
+  INVALID_VALUE
+  DUPLICATE_RESULT
+  TEST_ALREADY_AUTHORIZED
+  DEVICE_IN_SHADOW_MODE
+  QC_FAILURE_BLOCK
+}
+
+enum ExceptionStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+/// Gapless per-lab, per-day accession sequence. Locked FOR UPDATE inside the
+/// request transaction — gaps read as deleted samples to an auditor.
+model AccessionCounter {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  labId     String   @db.Uuid
+  /// Sequence scope, e.g. "SAMPLE:2026-07-31" or "ORDER:2026-07".
+  scope     String
+  counter   Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  lab Lab @relation(fields: [labId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, labId, scope])
+  @@map("accession_counter")
+}
+
+// =============================================================================
+// INVENTORY
+//
+// Reagents, controls, calibrators and consumables.
+//
+// The compliance point, and the reason this is not just a stock ledger: a
+// result produced with an EXPIRED reagent is not defensible. So consumption
+// from an expired lot is refused the same way authorisation is refused on a
+// failed QC run — the system removes the possibility rather than warning about
+// it. See COMPLIANCE.md §6 for the same pattern applied to QC.
+// =============================================================================
+
+model InventoryItem {
+  id               String            @id @default(uuid()) @db.Uuid
+  tenantId         String            @db.Uuid
+  code             String
+  name             String
+  category         InventoryCategory @default(REAGENT)
+  /// Unit of issue: mL, tests, pieces, vials.
+  unit             String            @default("tests")
+  manufacturer     String?
+  catalogNumber    String?
+  /// Total remaining across all lots below this triggers a reorder alert.
+  reorderLevel     Decimal           @default(0) @db.Decimal(12, 3)
+  /// e.g. "2-8°C", "-20°C", "Room temperature". Printed on the stock screen
+  /// because storing a reagent wrongly invalidates it as surely as expiry.
+  storageCondition String?
+  isActive         Boolean           @default(true)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  lots       InventoryLot[]
+  testUsages TestReagentUsage[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, category])
+  @@map("inventory_item")
+}
+
+enum InventoryCategory {
+  REAGENT
+  CONTROL
+  CALIBRATOR
+  CONSUMABLE
+  OTHER
+}
+
+model InventoryLot {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @db.Uuid
+  itemId     String    @db.Uuid
+  lotNumber  String
+  expiryDate DateTime? @db.Date
+
+  quantityReceived  Decimal @db.Decimal(12, 3)
+  /// Decremented by every CONSUMPTION. Never edited directly — the ledger of
+  /// stock_transaction rows is the source of truth and must reconcile to this.
+  quantityRemaining Decimal @db.Decimal(12, 3)
+
+  supplier   String?
+  invoiceRef String?
+  unitCost   Decimal? @db.Decimal(12, 2)
+
+  receivedAt        DateTime  @default(now())
+  receivedBy        String?   @db.Uuid
+  /// Many reagents have a shorter stability once opened than their printed
+  /// expiry, so the two dates are tracked separately.
+  openedAt          DateTime?
+  openStabilityDays Int?
+
+  status           InventoryLotStatus @default(AVAILABLE)
+  quarantineReason String?
+  disposedAt       DateTime?
+  disposalReason   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  item         InventoryItem      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  transactions StockTransaction[]
+
+  @@unique([tenantId, itemId, lotNumber])
+  @@index([tenantId, status, expiryDate])
+  @@map("inventory_lot")
+}
+
+enum InventoryLotStatus {
+  AVAILABLE
+  IN_USE
+  EXHAUSTED
+  EXPIRED
+  /// Held back pending investigation — e.g. a failed acceptance check.
+  QUARANTINED
+  DISPOSED
+}
+
+/// Append-only stock ledger. Every movement is a row; the lot's running balance
+/// is a derived convenience. Reconciling the two is a stock-audit question.
+model StockTransaction {
+  id           String               @id @default(uuid()) @db.Uuid
+  tenantId     String               @db.Uuid
+  lotId        String               @db.Uuid
+  type         StockTransactionType
+  /// Signed: positive for receipt, negative for consumption and disposal.
+  quantity     Decimal              @db.Decimal(12, 3)
+  balanceAfter Decimal              @db.Decimal(12, 3)
+  reason       String?
+  /// Links consumption to the test run that caused it — the traceability an
+  /// assessor asks for: "which reagent lot produced this result?"
+  sampleTestId String?              @db.Uuid
+  performedBy  String?              @db.Uuid
+  performedAt  DateTime             @default(now())
+
+  lot InventoryLot @relation(fields: [lotId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, lotId, performedAt(sort: Desc)])
+  @@index([tenantId, sampleTestId])
+  @@map("stock_transaction")
+}
+
+enum StockTransactionType {
+  RECEIPT
+  CONSUMPTION
+  /// Stock count correction. Requires a reason.
+  ADJUSTMENT
+  DISPOSAL
+  RETURN
+}
+
+/// How much of an item one run of a test consumes. Drives automatic decrement
+/// when results are entered, so stock reflects reality without anyone
+/// remembering to record it.
+model TestReagentUsage {
+  id               String  @id @default(uuid()) @db.Uuid
+  tenantId         String  @db.Uuid
+  testDefinitionId String  @db.Uuid
+  inventoryItemId  String  @db.Uuid
+  quantityPerTest  Decimal @db.Decimal(12, 4)
+
+  testDefinition TestDefinition @relation(fields: [testDefinitionId], references: [id], onDelete: Cascade)
+  inventoryItem  InventoryItem  @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+
+  @@unique([testDefinitionId, inventoryItemId])
+  @@index([tenantId])
+  @@map("test_reagent_usage")
+}
+
+// =============================================================================
+// MANUFACTURING QC — STORES, SPECIFICATIONS, QA DISPOSITION
+// =============================================================================
+//
+// The pharma phase of DATA_MODEL.md §9, built on the same spine as diagnostics.
+// A batch replaces a patient as the subject of an order; everything downstream —
+// accessioning, result entry, competency enforcement, the QC gate, e-signatures
+// and the audit chain — is unchanged and applies identically.
+//
+// The flow these models encode is the one a GMP site actually runs:
+//
+//   goods receipt -> QUARANTINE -> sampling request -> QC tests against the
+//   specification in force -> any out-of-spec result opens an OOS investigation
+//   -> QA disposition (approve / reject) -> APPROVED stock, or REJECTED
+//
+// The control that matters most: material cannot leave quarantine without a QA
+// disposition, and a disposition cannot be given while an OOS investigation is
+// open. That is what "quality assurance is independent of quality control"
+// means expressed in software.
+
+/// The material master: what the site buys, makes and ships.
+model Material {
+  id               String       @id @default(uuid()) @db.Uuid
+  tenantId         String       @db.Uuid
+  code             String
+  name             String
+  type             MaterialType
+  /// Unit of measure for stock: kg, L, nos, tablets.
+  unit             String       @default("kg")
+  manufacturer     String?
+  /// Pharmacopoeial reference where one applies, e.g. "IP 2022", "USP-NF".
+  pharmacopoeia    String?
+  /// e.g. "2-8 C", "Below 25 C, protected from light". Printed on the label and
+  /// checked at goods receipt.
+  storageCondition String?
+  /// Days from manufacture after which the batch must be retested rather than
+  /// simply used. Distinct from expiry: a retest can extend usable life.
+  retestPeriodDays Int?
+  /// Hazard and handling notes carried through to the stores screen.
+  handlingNotes    String?
+  isActive         Boolean      @default(true)
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  batches        MaterialBatch[]
+  specifications Specification[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, type])
+  @@map("material")
+}
+
+enum MaterialType {
+  /// Active pharmaceutical ingredient.
+  API
+  /// Excipient, solvent, or process reagent.
+  RAW_MATERIAL
+  /// Bottles, foils, cartons, labels.
+  PACKAGING
+  /// Work in progress between stages.
+  INTERMEDIATE
+  /// Bulk product before packing.
+  BULK
+  /// Packed, saleable product.
+  FINISHED_PRODUCT
+}
+
+/// A goods receipt note. One consignment, one or more batches.
+model GoodsReceipt {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @db.Uuid
+  grnNumber        String
+  supplierName     String
+  supplierBatchRef String?
+  invoiceRef       String?
+  poReference      String?
+  receivedAt       DateTime @default(now())
+  receivedBy       String?  @db.Uuid
+  /// Vehicle condition, seals intact, cold-chain logger reading. A receipt
+  /// check that fails is grounds to reject before any sampling happens.
+  receiptCheckNote String?
+  createdAt        DateTime @default(now())
+
+  batches MaterialBatch[]
+
+  @@unique([tenantId, grnNumber])
+  @@index([tenantId, receivedAt(sort: Desc)])
+  @@map("goods_receipt")
+}
+
+/// A batch or lot of material. The subject of a manufacturing QC order.
+model MaterialBatch {
+  id              String  @id @default(uuid()) @db.Uuid
+  tenantId        String  @db.Uuid
+  materialId      String  @db.Uuid
+  goodsReceiptId  String? @db.Uuid
+  /// The site's own batch number. For a finished product this appears on the
+  /// pack and on every recall notice, so it is immutable once set.
+  batchNumber     String
+  /// The supplier's lot number, kept separately: traceability upstream needs
+  /// their identifier, not ours.
+  manufacturerLot String?
+
+  quantityReceived  Decimal @db.Decimal(14, 3)
+  /// Decremented as the batch is issued to production or destroyed.
+  quantityAvailable Decimal @db.Decimal(14, 3)
+  unit              String  @default("kg")
+  /// Number of physical containers. Sampling plans are per container.
+  containerCount    Int?
+
+  manufacturedAt DateTime? @db.Date
+  expiryDate     DateTime? @db.Date
+  retestDate     DateTime? @db.Date
+
+  status   BatchStatus @default(QUARANTINE)
+  /// Physical location. Quarantine and approved stock are physically separated
+  /// in a GMP store, and the record must say which side the material is on.
+  location String?
+
+  /// Set by the QA disposition. Denormalised onto the batch so the stores
+  /// screen can answer "may I issue this" without a join.
+  dispositionedAt DateTime?
+  dispositionedBy String?   @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  createdBy String?  @db.Uuid
+
+  material         Material                @relation(fields: [materialId], references: [id])
+  goodsReceipt     GoodsReceipt?           @relation(fields: [goodsReceiptId], references: [id])
+  orders           LabOrder[]
+  samplingRequests SamplingRequest[]
+  dispositions     BatchDisposition[]
+  investigations   OosInvestigation[]
+  certificates     CertificateOfAnalysis[]
+
+  @@unique([tenantId, materialId, batchNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, expiryDate])
+  @@map("material_batch")
+}
+
+enum BatchStatus {
+  /// Received, physically segregated, not yet sampled. The default, and the
+  /// only state a newly received batch may be in.
+  QUARANTINE
+  /// Sampled; QC testing in progress.
+  UNDER_TEST
+  /// QA has released it. The only status from which material may be issued.
+  APPROVED
+  REJECTED
+  /// Approved once, but the retest date has passed. Back to QC before use.
+  RETEST_DUE
+  EXPIRED
+  /// Fully issued to production, or destroyed.
+  CONSUMED
+}
+
+/// The acceptance criteria a batch is tested against.
+///
+/// The pharma generalisation of `ReferenceRange`: versioned by effective date,
+/// never edited in place, and approved by QA before it governs anything. A
+/// result is judged against the specification in force when it was produced,
+/// not the one in force today.
+model Specification {
+  id            String              @id @default(uuid()) @db.Uuid
+  tenantId      String              @db.Uuid
+  materialId    String              @db.Uuid
+  code          String
+  version       Int                 @default(1)
+  status        SpecificationStatus @default(DRAFT)
+  /// Pharmacopoeial monograph or internal standard this derives from.
+  basis         String?
+  effectiveFrom DateTime?
+  effectiveTo   DateTime?
+  approvedBy    String?             @db.Uuid
+  approvedAt    DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  createdBy     String?             @db.Uuid
+
+  material     Material                @relation(fields: [materialId], references: [id])
+  limits       SpecLimit[]
+  certificates CertificateOfAnalysis[]
+
+  @@unique([tenantId, code, version])
+  @@index([tenantId, materialId, status])
+  @@map("specification")
+}
+
+enum SpecificationStatus {
+  DRAFT
+  /// Approved by QA and in force.
+  APPROVED
+  /// Replaced by a later version. Retained so old results stay explicable.
+  SUPERSEDED
+  /// Withdrawn without a replacement.
+  RETIRED
+}
+
+/// One acceptance criterion within a specification.
+model SpecLimit {
+  id               String  @id @default(uuid()) @db.Uuid
+  tenantId         String  @db.Uuid
+  specificationId  String  @db.Uuid
+  analyteId        String  @db.Uuid
+  /// Which test produces this measurement. Drives what QC actually books.
+  testDefinitionId String? @db.Uuid
+  sortOrder        Int     @default(0)
+
+  minValue     Decimal? @db.Decimal(18, 6)
+  maxValue     Decimal? @db.Decimal(18, 6)
+  /// For criteria that are not a numeric interval: "Complies", "White to
+  /// off-white powder", "Not more than 0.1 percent".
+  textCriteria String?
+  unit         String?
+
+  /// A critical parameter fails the batch outright. A non-critical excursion
+  /// may still be dispositioned with justification — that distinction is what
+  /// stops every minor deviation becoming a rejection.
+  isCritical Boolean @default(true)
+
+  specification  Specification   @relation(fields: [specificationId], references: [id], onDelete: Cascade)
+  analyte        Analyte         @relation(fields: [analyteId], references: [id])
+  testDefinition TestDefinition? @relation(fields: [testDefinitionId], references: [id])
+
+  @@unique([specificationId, analyteId])
+  @@index([tenantId])
+  @@map("spec_limit")
+}
+
+/// Stores or QA asking QC to sample a batch.
+///
+/// Modelled explicitly rather than implied by "an order exists", because the
+/// request and the sampling are separated in time and by department, and an
+/// inspector asks who requested it and when.
+model SamplingRequest {
+  id                String                @id @default(uuid()) @db.Uuid
+  tenantId          String                @db.Uuid
+  batchId           String                @db.Uuid
+  requestNumber     String
+  reason            SamplingReason        @default(RELEASE_TESTING)
+  note              String?
+  status            SamplingRequestStatus @default(PENDING)
+  requestedBy       String?               @db.Uuid
+  requestedAt       DateTime              @default(now())
+  /// The order raised when QC sampled it — the join back into the spine.
+  orderId           String?               @unique @db.Uuid
+  sampledBy         String?               @db.Uuid
+  sampledAt         DateTime?
+  /// Containers sampled and quantity drawn — the GMP sampling record.
+  containersSampled Int?
+  quantitySampled   Decimal?              @db.Decimal(12, 3)
+  cancelledAt       DateTime?
+  cancelReason      String?
+
+  batch MaterialBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, requestNumber])
+  @@index([tenantId, status])
+  @@map("sampling_request")
+}
+
+enum SamplingReason {
+  RELEASE_TESTING
+  RETEST
+  /// Sampled again after an OOS investigation found the first invalid.
+  OOS_RESAMPLE
+  STABILITY
+  COMPLAINT_INVESTIGATION
+}
+
+enum SamplingRequestStatus {
+  PENDING
+  SAMPLED
+  CANCELLED
+}
+
+/// QA's decision on a batch. The gate between the laboratory and the factory.
+model BatchDisposition {
+  id           String              @id @default(uuid()) @db.Uuid
+  tenantId     String              @db.Uuid
+  batchId      String              @db.Uuid
+  decision     DispositionDecision
+  /// Mandatory. "Approved" with no basis is not a disposition, it is a rubber
+  /// stamp, and it is the first thing an inspector reads.
+  rationale    String
+  /// Set when a non-critical excursion is accepted anyway. Requires naming the
+  /// deviation reference.
+  deviationRef String?
+  decidedBy    String              @db.Uuid
+  decidedAt    DateTime            @default(now())
+  /// The e-signature applied. Disposition is a signed act under 21 CFR 11.
+  signatureId  String?             @db.Uuid
+
+  batch MaterialBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, batchId])
+  @@index([tenantId, decidedAt(sort: Desc)])
+  @@map("batch_disposition")
+}
+
+enum DispositionDecision {
+  APPROVED
+  REJECTED
+  /// Released against a documented deviation: approved despite a non-critical
+  /// excursion, with the justification recorded.
+  APPROVED_WITH_DEVIATION
+  /// Sent back for retest rather than decided.
+  RETEST_REQUIRED
+}
+
+/// An out-of-specification result and its investigation.
+///
+/// Opened automatically the moment a result breaches a spec limit. Its
+/// existence blocks disposition: a batch cannot be released while the question
+/// of why a result failed is still open. Phase I asks whether the laboratory
+/// erred; Phase II investigates manufacturing.
+model OosInvestigation {
+  id                  String @id @default(uuid()) @db.Uuid
+  tenantId            String @db.Uuid
+  batchId             String @db.Uuid
+  resultId            String @db.Uuid
+  investigationNumber String
+  /// The value and the limit it breached, snapshotted: the specification may be
+  /// superseded before the investigation closes.
+  observedValue       String
+  limitBreached       String
+  analyteCode         String
+
+  phase                OosPhase       @default(PHASE_I)
+  status               OosStatus      @default(OPEN)
+  /// Phase I: was this a laboratory error? A named cause, or "not established".
+  labInvestigationNote String?
+  /// Phase II: manufacturing investigation, where Phase I found no lab cause.
+  manufacturingNote    String?
+  rootCause            String?
+  conclusion           OosConclusion?
+  correctiveAction     String?
+
+  openedBy String?   @db.Uuid
+  openedAt DateTime  @default(now())
+  closedBy String?   @db.Uuid
+  closedAt DateTime?
+
+  batch MaterialBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, investigationNumber])
+  @@index([tenantId, status])
+  @@index([tenantId, batchId])
+  @@map("oos_investigation")
+}
+
+enum OosPhase {
+  PHASE_I
+  PHASE_II
+}
+
+enum OosStatus {
+  OPEN
+  UNDER_INVESTIGATION
+  CLOSED
+}
+
+enum OosConclusion {
+  /// A laboratory error was found and named. The original result is invalidated.
+  LAB_ERROR_CONFIRMED
+  /// No laboratory cause; the result stands and reflects the material.
+  MANUFACTURING_CONFIRMED
+  /// No assignable cause found. The result stands — the conclusion regulators
+  /// scrutinise hardest.
+  NO_ASSIGNABLE_CAUSE
+  INVALIDATED_RESAMPLED
+}
+
+/// A certificate of analysis for a released batch.
+model CertificateOfAnalysis {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @db.Uuid
+  batchId         String   @db.Uuid
+  coaNumber       String
+  version         Int      @default(1)
+  /// The specification the results were judged against, held by id so a
+  /// reprint reproduces the original judgement rather than today's.
+  specificationId String   @db.Uuid
+  issuedBy        String   @db.Uuid
+  issuedAt        DateTime @default(now())
+  pdfKey          String?
+  contentHash     String?
+
+  batch         MaterialBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  specification Specification @relation(fields: [specificationId], references: [id])
+
+  @@unique([tenantId, coaNumber, version])
+  @@index([tenantId, batchId])
+  @@map("certificate_of_analysis")
+}

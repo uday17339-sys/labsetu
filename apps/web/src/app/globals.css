@@ -1,0 +1,61 @@
+@import 'tailwindcss';
+
+/*
+ * LabSetu design tokens.
+ *
+ * Deliberately high-contrast and dense. Lab staff use this for eight hours on
+ * cheap monitors under fluorescent light, often standing at a bench — legibility
+ * and information density beat whitespace and subtlety here.
+ */
+@theme {
+  --color-ink-50: #f6f7f9;
+  --color-ink-100: #eceef2;
+  --color-ink-200: #d5dae3;
+  --color-ink-300: #b0b9c9;
+  --color-ink-400: #8493ab;
+  --color-ink-500: #647591;
+  --color-ink-600: #4f5d78;
+  --color-ink-700: #414c62;
+  --color-ink-800: #384153;
+  --color-ink-900: #323947;
+  --color-ink-950: #21252e;
+
+  --color-brand-50: #eef6ff;
+  --color-brand-100: #d9ecff;
+  --color-brand-500: #2f7fe8;
+  --color-brand-600: #1f63c9;
+  --color-brand-700: #1b4fa3;
+
+  /* Clinical status colours. Critical is the loudest thing on any screen. */
+  --color-critical: #b91c1c;
+  --color-critical-bg: #fef2f2;
+  --color-high: #c2410c;
+  --color-low: #1d4ed8;
+  --color-normal: #15803d;
+  --color-pending: #a16207;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-ink-50);
+  color: var(--color-ink-900);
+  font-feature-settings: 'tnum' 1; /* tabular figures: numeric columns align */
+}
+
+/* Result values are read as a column and compared against each other. */
+.numeric {
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: white;
+  }
+}

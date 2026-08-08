@@ -1,0 +1,47 @@
+{
+  "name": "@labsetu/db",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Prisma schema, RLS security policies and seed data for LabSetu",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "//": "Env lives in the repo root .env; dotenv-cli hands it to Prisma, which would otherwise only look in packages/db.",
+  "scripts": {
+    "env": "dotenv -e ../../.env --",
+    "generate": "dotenv -e ../../.env -- prisma generate",
+    "migrate": "dotenv -e ../../.env -- prisma migrate dev && npm run security:apply",
+    "migrate:deploy": "dotenv -e ../../.env -- prisma migrate deploy && npm run security:apply",
+    "security:apply": "node scripts/apply-security.mjs",
+    "reset": "dotenv -e ../../.env -- prisma migrate reset --force --skip-seed && npm run security:apply && npm run seed",
+    "seed": "dotenv -e ../../.env -- tsx prisma/seed.ts",
+    "studio": "dotenv -e ../../.env -- prisma studio",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "sync-roles": "dotenv -e ../../.env -- node scripts/sync-roles.mjs",
+    "seed-inventory": "dotenv -e ../../.env -- node scripts/seed-inventory.mjs"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.2.1"
+  },
+  "//deps": "contracts and crypto are seed-time only; the runtime client needs neither.",
+  "devDependencies": {
+    "@labsetu/contracts": "*",
+    "@labsetu/crypto": "*",
+    "dotenv": "^16.4.7",
+    "dotenv-cli": "^8.0.0",
+    "pg": "^8.13.1",
+    "prisma": "^6.2.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "@types/pg": "^8.11.10"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}

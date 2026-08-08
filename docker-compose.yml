@@ -1,0 +1,94 @@
+name: labsetu
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: labsetu-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: labsetu
+      POSTGRES_PASSWORD: labsetu_dev_password
+      POSTGRES_DB: labsetu
+      # Deterministic collation so ORDER BY is stable across environments —
+      # matters when report ordering is part of a validated output.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      # Host port is deliberately non-default so a locally-installed Postgres on
+      # 5432 keeps working alongside this stack.
+      - "55432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./packages/db/docker/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labsetu -d labsetu"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: labsetu-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "labsetu_dev_password"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "labsetu_dev_password", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # S3-compatible object storage for raw instrument files, report PDFs and
+  # attachments. In production this is AWS S3 in ap-south-1/ap-south-2 with
+  # Object Lock (WORM) enabled on the raw-data bucket.
+  minio:
+    image: minio/minio:latest
+    container_name: labsetu-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: labsetu
+      MINIO_ROOT_PASSWORD: labsetu_dev_password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Creates the buckets the app expects on first boot.
+  minio-init:
+    image: minio/mc:latest
+    container_name: labsetu-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 labsetu labsetu_dev_password &&
+      mc mb --ignore-existing local/labsetu-raw &&
+      mc mb --ignore-existing local/labsetu-reports &&
+      mc mb --ignore-existing local/labsetu-attachments &&
+      echo 'buckets ready'
+      "
+
+  # Local mail catcher so report-delivery flows are testable without sending
+  # anything to a real address.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: labsetu-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

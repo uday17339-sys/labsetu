@@ -1,0 +1,25 @@
+{
+  "name": "@labsetu/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LabSetu instrument gateway — runs on-premises in the lab, translates analyzer protocols into the canonical envelope (ADR 0004)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "dotenv -e ../../.env -- tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "simulate": "tsx src/simulate.ts",
+    "test": "node --test dist/**/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@labsetu/contracts": "*",
+    "@labsetu/crypto": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "dotenv-cli": "^8.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
