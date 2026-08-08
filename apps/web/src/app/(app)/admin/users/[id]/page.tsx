@@ -141,7 +141,7 @@ export default async function UserDetailPage({ params }: { params: Promise<{ id:
 
   const canAuthorize = live.some((c) => c.level === 'AUTHORIZE');
   const holdsAuthorizeRole = detail.roles.some((r) =>
-    ['PATHOLOGIST', 'LAB_ADMIN'].includes(r.code),
+    ['QA', 'LAB_ADMIN', 'PATHOLOGIST'].includes(r.code),
   );
 
   return (

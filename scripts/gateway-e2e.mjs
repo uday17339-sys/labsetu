@@ -18,7 +18,7 @@
 import { createHmac, createHash, randomUUID } from 'node:crypto';
 
 const BASE = process.argv[2] ?? 'http://localhost:4000';
-const TENANT = 'SUNRISE';
+const TENANT = 'VANTAGE';
 const PASSWORD = 'LabSetu@2026';
 
 let pass = 0;
@@ -112,7 +112,7 @@ async function main() {
   // exactly once against the seeded code.
   const admin = (
     await api('POST', '/auth/login', {
-      body: { tenantCode: TENANT, email: 'admin@sunrise.test', password: PASSWORD },
+      body: { tenantCode: TENANT, email: 'admin@vantage.test', password: PASSWORD },
     })
   ).body;
 
@@ -217,7 +217,7 @@ async function main() {
 
   const tech = (
     await api('POST', '/auth/login', {
-      body: { tenantCode: TENANT, email: 'tech@sunrise.test', password: PASSWORD },
+      body: { tenantCode: TENANT, email: 'qc@vantage.test', password: PASSWORD },
     })
   ).body;
 
@@ -230,48 +230,76 @@ async function main() {
   // ----------------------------------------------------------- happy path
   section('Real result flowing analyzer -> LIMS');
 
-  const reception = (
+  // The manufacturing path: a consignment is received, QC samples it, and the
+  // HPLC reports the assay against that AR number. There is no patient anywhere
+  // in this flow — the subject of the sample is a material batch.
+  const stores = (
     await api('POST', '/auth/login', {
-      body: { tenantCode: TENANT, email: 'front@sunrise.test', password: PASSWORD },
+      body: { tenantCode: TENANT, email: 'stores@vantage.test', password: PASSWORD },
+    })
+  ).body;
+  const qa = (
+    await api('POST', '/auth/login', {
+      body: { tenantCode: TENANT, email: 'qa@vantage.test', password: PASSWORD },
     })
   ).body;
 
-  const catalog = await api('GET', '/catalog/tests', { token: reception.accessToken });
-  const kft = catalog.body.find((t) => t.code === 'KFT');
+  const labId = admin.user.labs[0].id;
+  const materials = await api('GET', '/stores/materials', { token: stores.accessToken });
+  const material = (materials.body ?? []).find((m) => m.code === 'API-PCM');
 
-  const patient = await api('POST', '/patients', {
-    token: reception.accessToken,
-    body: { fullName: 'Gateway Test Patient', sex: 'FEMALE', ageYears: 40, phone: '9848000111' },
-  });
-
-  const order = await api('POST', '/orders', {
-    token: reception.accessToken,
+  const batchNumber = `GW-${Date.now()}`;
+  const receipt = await api('POST', '/stores/receive', {
+    token: stores.accessToken,
     body: {
-      labId: reception.user.labs[0].id,
-      patientId: patient.body.id,
-      items: [{ testDefinitionId: kft.id }],
-      createSample: true,
+      labId,
+      supplierName: 'Gateway Test Supplier',
+      batches: [
+        {
+          materialId: material.id,
+          batchNumber,
+          quantity: 80,
+          containerCount: 4,
+          manufacturedAt: new Date(Date.now() - 10 * 864e5).toISOString().slice(0, 10),
+          expiryDate: new Date(Date.now() + 500 * 864e5).toISOString().slice(0, 10),
+        },
+      ],
     },
   });
-  const accession = order.body.samples[0].accessionNumber;
-  ok('order placed for the analyzer to fulfil', accession);
+  const batchId = receipt.body?.batches?.[0]?.id;
+  batchId
+    ? ok('consignment received for analysis', batchNumber)
+    : bad('consignment received', JSON.stringify(receipt.body).slice(0, 140));
+
+  const req = await api('POST', '/stores/sampling-requests', {
+    token: stores.accessToken,
+    body: { batchId, reason: 'RELEASE_TESTING' },
+  });
+  const sampled = await api('POST', `/stores/sampling-requests/${req.body.id}/sample`, {
+    token: tech.accessToken,
+    body: { labId, containersSampled: 3 },
+  });
+  const accession = sampled.body?.accessionNumber;
+  accession
+    ? ok('QC sampled the batch', `AR ${accession}`)
+    : bad('batch sampled', JSON.stringify(sampled.body).slice(0, 140));
 
   const sample = await api('GET', `/samples/by-accession/${accession}`, {
     token: tech.accessToken,
   });
-  await api('POST', `/samples/${sample.body.id}/collect`, { token: tech.accessToken, body: {} });
-  await api('POST', `/samples/${sample.body.id}/receive`, { token: tech.accessToken, body: {} });
-  ok('sample received into the lab');
 
-  // Build a genuine HL7 ORU^R01 as the AU480 would emit, then push it through
-  // the same signed ingest path the gateway uses.
-  const hl7Raw = buildHl7(accession, [
-    { code: 'BUN', value: '86', units: 'mg/dL' },   // high (ref 15-40)
-    { code: 'CRE', value: '6.8', units: 'mg/dL' },  // critical (>6.0)
-    { code: 'NA', value: '141', units: 'mmol/L' },  // normal
-    { code: 'K', value: '6.9', units: 'mmol/L' },   // critical high (>6.5)
-  ]);
+  // Locate the assay test — CHEM-01 maps its "ASSAY" channel onto our analyte.
+  let assayTestId = null;
+  for (const t of sample.body?.tests ?? []) {
+    const detail = await api('GET', `/tests/${t.id}`, { token: tech.accessToken });
+    if ((detail.body?.testDefinition?.analytes ?? []).some((a) => a.analyte.code === 'ASSAY')) {
+      assayTestId = t.id;
+      break;
+    }
+  }
+  assayTestId ? ok('assay test booked from the specification') : bad('assay test booked');
 
+  const hl7Raw = buildHl7(accession, [{ code: 'ASSAY', value: '99.42', units: '%' }]);
   const envelope = {
     messageId: randomUUID(),
     deviceId: creds.deviceId,
@@ -280,69 +308,63 @@ async function main() {
     rawChecksum: createHash('sha256').update(hl7Raw, 'utf8').digest('hex'),
     rawPreview: hl7Raw.slice(0, 4096),
     observations: [
-      { specimenRef: accession, testCode: 'BUN', value: '86', units: 'mg/dL', resultStatus: 'FINAL', rerunCount: 0, isQc: false, rawFields: {} },
-      { specimenRef: accession, testCode: 'CRE', value: '6.8', units: 'mg/dL', resultStatus: 'FINAL', rerunCount: 0, isQc: false, rawFields: {} },
-      { specimenRef: accession, testCode: 'NA', value: '141', units: 'mmol/L', resultStatus: 'FINAL', rerunCount: 0, isQc: false, rawFields: {} },
-      { specimenRef: accession, testCode: 'K', value: '6.9', units: 'mmol/L', resultStatus: 'FINAL', rerunCount: 0, isQc: false, rawFields: {} },
+      {
+        specimenRef: accession,
+        testCode: 'ASSAY',
+        value: '99.42',
+        units: '%',
+        resultStatus: 'FINAL',
+        rerunCount: 0,
+        isQc: false,
+        rawFields: {},
+      },
     ],
   };
 
   const ingested = await devicePost(creds, '/v1/ingest/messages', envelope);
   ingested.status === 202 && ingested.body.status === 'ACCEPTED'
     ? ok('analyzer message ingested', `202 ${ingested.body.status}`)
-    : bad('analyzer message ingested', `${ingested.status} ${JSON.stringify(ingested.body).slice(0, 250)}`);
+    : bad('analyzer message ingested', `${ingested.status} ${JSON.stringify(ingested.body).slice(0, 200)}`);
 
-  // Idempotency: the gateway replaying its outbox must not duplicate results.
+  // Idempotency: a gateway replaying its outbox must not duplicate results.
   const replay = await devicePost(creds, '/v1/ingest/messages', envelope);
   replay.body?.status === 'DUPLICATE'
     ? ok('replayed messageId is a no-op', 'DUPLICATE, not a second result')
-    : bad('replay is idempotent', JSON.stringify(replay.body).slice(0, 200));
+    : bad('replay is idempotent', JSON.stringify(replay.body).slice(0, 160));
 
-  // ---------------------------------------------------------------- mapping
-  section('Mapping and clinical evaluation');
+  section('Mapping and evaluation against the specification');
 
-  const testAfter = await api('GET', `/tests/${sample.body.tests[0].id}`, {
-    token: tech.accessToken,
-  });
-  const results = testAfter.body.results ?? [];
+  const after = await api('GET', `/tests/${assayTestId}`, { token: tech.accessToken });
+  const results = after.body?.results ?? [];
+  const assay = results.find((r) => r.analyte?.code === 'ASSAY');
 
-  results.length === 4
-    ? ok('all four analytes mapped via DeviceChannel', 'BUN→UREA, CRE→CREA, NA, K')
-    : bad('analytes mapped', `got ${results.length}`);
+  assay
+    ? ok('instrument channel ASSAY mapped to our analyte', `value ${assay.value}`)
+    : bad('assay mapped', JSON.stringify(results).slice(0, 160));
 
-  const byCode = Object.fromEntries(results.map((r) => [r.analyte?.code, r]));
-
-  byCode.UREA?.value === '86'
-    ? ok('instrument code BUN mapped to analyte UREA', 'value 86')
-    : bad('BUN → UREA mapping', JSON.stringify(byCode.UREA ?? {}).slice(0, 150));
-
-  byCode.UREA?.source === 'INSTRUMENT'
+  assay?.source === 'INSTRUMENT'
     ? ok('result provenance recorded', 'source=INSTRUMENT')
-    : bad('result provenance', `source=${byCode.UREA?.source}`);
+    : bad('result provenance', `source=${assay?.source}`);
 
-  byCode.CREA?.flag === 'CRITICAL_HIGH' && byCode.CREA?.isCritical
-    ? ok('critical creatinine flagged by OUR range', `6.8 → ${byCode.CREA.flag}`)
-    : bad('critical creatinine flagged', `flag=${byCode.CREA?.flag}`);
+  // 99.42 sits inside 98.0–102.0, so no investigation should be raised.
+  after.body?.status === 'RESULT_ENTERED'
+    ? ok('instrument results are NOT auto-authorised', 'human review still required')
+    : bad('not auto-authorised', `status=${after.body?.status}`);
 
-  byCode.K?.flag === 'CRITICAL_HIGH'
-    ? ok('critical potassium flagged', `6.9 → ${byCode.K.flag}`)
-    : bad('critical potassium flagged', `flag=${byCode.K?.flag}`);
+  const investigations = await api('GET', '/qa/investigations?status=OPEN', {
+    token: qa.accessToken,
+  });
+  const spurious = (investigations.body ?? []).filter((i) => i.batch?.batchNumber === batchNumber);
+  spurious.length === 0
+    ? ok('an in-specification analyzer result opens no investigation')
+    : bad('no false OOS', `${spurious.length} raised`);
 
-  byCode.NA?.flag === 'NORMAL'
-    ? ok('normal sodium not flagged', '141 → NORMAL')
-    : bad('normal sodium', `flag=${byCode.NA?.flag}`);
 
-  // The single most important safety property of the whole pipeline.
-  testAfter.body.status === 'RESULT_ENTERED'
-    ? ok('instrument results are NOT auto-authorised', 'status RESULT_ENTERED — human review still required')
-    : bad('instrument results not auto-authorised', `status=${testAfter.body.status}`);
-
-  // ------------------------------------------------------------------ audit
   section('Audit trail');
 
   const auditor = (
     await api('POST', '/auth/login', {
-      body: { tenantCode: TENANT, email: 'auditor@sunrise.test', password: PASSWORD },
+      body: { tenantCode: TENANT, email: 'auditor@vantage.test', password: PASSWORD },
     })
   ).body;
 

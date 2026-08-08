@@ -12,7 +12,7 @@
  *
  * Usage:
  *   node scripts/setup-neon.mjs "postgresql://neondb_owner:...@ep-xxx.aws.neon.tech/neondb"
- *   node scripts/setup-neon.mjs "<url>" --with-pharma
+ *   node scripts/setup-neon.mjs "<url>"
  *   node scripts/setup-neon.mjs "<url>" --skip-seed
  *
  * Pass the DIRECT connection string, not the pooled one. Migrations create
@@ -24,12 +24,11 @@ import { writeFileSync } from 'node:fs';
 import pg from 'pg';
 
 const ADMIN_URL = process.argv[2];
-const WITH_PHARMA = process.argv.includes('--with-pharma');
 const SKIP_SEED = process.argv.includes('--skip-seed');
 
 if (!ADMIN_URL || !ADMIN_URL.startsWith('postgres')) {
   console.error(`
-Usage: node scripts/setup-neon.mjs "<neon-direct-connection-string>" [--with-pharma] [--skip-seed]
+Usage: node scripts/setup-neon.mjs "<neon-direct-connection-string>" [--skip-seed]
 
 Get the string from the Neon console → Connection Details → choose "Direct
 connection" (NOT "Pooled connection"). It looks like:
@@ -170,10 +169,6 @@ if (!SKIP_SEED) {
     warn('inventory seed skipped');
   }
 
-  if (WITH_PHARMA) {
-    run('node packages/db/scripts/seed-pharma.mjs', seedEnv);
-    ok('materials, specifications, manufacturing staff and a quarantined consignment');
-  }
 } else {
   step(4, 'Seeding skipped (--skip-seed)');
   warn('Keys below are still newly generated. If the database already holds encrypted');

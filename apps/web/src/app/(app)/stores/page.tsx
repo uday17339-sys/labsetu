@@ -226,7 +226,7 @@ export default async function StoresPage({
         )}
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-3">
         {canReceive && materials.length > 0 && (
           <Card title="Receive a consignment">
             <ReceiveGoodsForm

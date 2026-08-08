@@ -143,7 +143,7 @@ export default async function QcPage() {
         </div>
       )}
 
-      <div className="grid gap-5 lg:grid-cols-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-3">
         {can(user, 'qc:enter') && (
           <Card title="Record a QC run">
             <div className="p-4">
@@ -156,7 +156,7 @@ export default async function QcPage() {
           </Card>
         )}
 
-        <Card className="lg:col-span-2" title="Recent runs">
+        <Card className="min-w-0 lg:col-span-2" title="Recent runs">
           {results.length === 0 ? (
             <EmptyState
               title="No QC recorded yet"

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { apiFetch } from '@/lib/api';
 import { getSessionUser, can } from '@/lib/session';
+import { TERMS, isPharma } from '@/lib/vertical';
 import { Card, Stat, StatusPill, EmptyState } from '@/components/ui';
 import { money } from '@/lib/format';
 
@@ -89,7 +90,7 @@ export default async function DashboardPage() {
 
   // What this person's day is actually made of, in one line.
   const summary = seesClinical
-    ? `${items.length} test${items.length === 1 ? '' : 's'} in progress across the lab`
+    ? `${items.length} test${items.length === 1 ? '' : 's'} in progress across {TERMS.lab}`
     : storesAlerts
       ? `${storesAlerts.counts.quarantined} batch${storesAlerts.counts.quarantined === 1 ? '' : 'es'} in quarantine · ` +
         `${storesAlerts.counts.underTest} under test · ${storesAlerts.counts.approved} released`
@@ -223,9 +224,9 @@ export default async function DashboardPage() {
         </div>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-3">
         <Card
-          className="lg:col-span-2"
+          className="min-w-0 lg:col-span-2"
           title="Needs attention"
           action={
             <Link
@@ -239,7 +240,7 @@ export default async function DashboardPage() {
           {items.length === 0 ? (
             <EmptyState
               title="Nothing in progress"
-              hint="Registered samples appear here once they are received into the lab."
+              hint="Sampled batches appear here once QC has received them."
             />
           ) : (
             <>
@@ -328,7 +329,7 @@ export default async function DashboardPage() {
 
         <div className="space-y-6">
           {indicators && (
-            <Card title="NABL quality indicators">
+            <Card title="{TERMS.indicators}">
               <div className="divide-y divide-ink-100">
                 <IndicatorRow
                   label="Sample rejection rate"
@@ -347,7 +348,7 @@ export default async function DashboardPage() {
                 />
               </div>
               <p className="border-t border-ink-100 px-4 py-2 text-xs text-ink-400">
-                Last 30 days. These are the indicators an assessor samples.
+                {TERMS.indicatorsNote}
               </p>
             </Card>
           )}
@@ -355,10 +356,10 @@ export default async function DashboardPage() {
           <Card title="Quick actions">
             <div className="divide-y divide-ink-100">
               {can(user, 'order:create') && (
-                <QuickLink href="/register" label="Register a patient & order tests" />
+                <QuickLink href="/stores" label="Book a batch for release testing" />
               )}
               {can(user, 'sample:read') && (
-                <QuickLink href="/samples" label="Find a sample by accession or barcode" />
+                <QuickLink href="/samples" label="Find a sample by AR number or barcode" />
               )}
               {can(user, 'audit:read') && (
                 <QuickLink href="/audit" label="Search the audit trail" />

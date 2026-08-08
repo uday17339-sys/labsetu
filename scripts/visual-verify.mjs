@@ -47,7 +47,7 @@ const VIEWPORTS = [
   { name: 'Desktop', width: 1440, height: 900, mobile: false },
 ];
 
-const SCREENS = ['/', '/worklist', '/samples', '/register', '/qc', '/audit'];
+const SCREENS = ['/', '/worklist', '/samples', '/stores', '/qc', '/audit'];
 
 async function main() {
   mkdirSync(OUT, { recursive: true });
@@ -57,8 +57,8 @@ async function main() {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      tenantCode: 'SUNRISE',
-      email: 'pathologist@sunrise.test',
+      tenantCode: 'VANTAGE',
+      email: 'qa@vantage.test',
       password: 'LabSetu@2026',
     }),
   }).then((r) => r.json());

@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto';
 
 const API = process.argv[2] ?? 'http://localhost:4000';
-const TENANT = 'SUNRISE';
+const TENANT = 'VANTAGE';
 const PASSWORD = 'LabSetu@2026';
 
 let pass = 0;
@@ -70,11 +70,11 @@ const login = (email) =>
 async function main() {
   console.log(`\n\x1b[1mLabSetu feature verification\x1b[0m  →  ${API}\n`);
 
-  const admin = await login('admin@sunrise.test');
-  const tech = await login('tech@sunrise.test');
-  const patho = await login('pathologist@sunrise.test');
-  const reception = await login('front@sunrise.test');
-  const auditor = await login('auditor@sunrise.test');
+  const admin = await login('admin@vantage.test');
+  const tech = await login('qc@vantage.test');
+  const qa = await login('qa@vantage.test');
+  const stores = await login('stores@vantage.test');
+  const auditor = await login('auditor@vantage.test');
 
   // =========================================================== INVENTORY
   section('Inventory — stock and alerts');
@@ -84,21 +84,21 @@ async function main() {
     ? ok('inventory items configured', `${items.body.length} items`)
     : bad('inventory items', JSON.stringify(items.body).slice(0, 160));
 
-  const glucose = items.body.find((i) => i.code === 'RGT-GLU');
-  glucose
-    ? ok('glucose reagent present', `${glucose.quantityOnHand} ${glucose.unit} usable`)
-    : bad('glucose reagent present');
+  const standard = items.body.find((i) => i.code === 'STD-PCM-RS');
+  standard
+    ? ok('the reference standard is stocked', `${standard.quantityOnHand} ${standard.unit} usable`)
+    : bad('reference standard present');
 
   // The expired lot exists but must NOT count toward usable stock.
-  const expiredLot = glucose?.lots?.find((l) => l.isExpired);
+  const expiredLot = standard?.lots?.find((l) => l.isExpired);
   expiredLot
     ? ok('an expired lot is present in the data', `lot ${expiredLot.lotNumber}`)
     : bad('expired lot present for the gate test');
 
   const usableExcludesExpired =
-    glucose && expiredLot
-      ? glucose.quantityOnHand ===
-        glucose.lots
+    standard && expiredLot
+      ? standard.quantityOnHand ===
+        standard.lots
           .filter((l) => !l.isExpired)
           .reduce((s, l) => s + l.quantityRemaining, 0)
       : false;
@@ -122,7 +122,7 @@ async function main() {
 
   const expiredConsume = await api('POST', '/inventory/consume', {
     token: tech.accessToken,
-    body: { itemId: glucose.id, quantity: 1, lotId: expiredLot.id },
+    body: { itemId: standard.id, quantity: 1, lotId: expiredLot.id },
   });
   expiredConsume.status === 400 && /expired/i.test(expiredConsume.body?.detail ?? '')
     ? ok('consuming an EXPIRED lot is refused', expiredConsume.body.detail.slice(0, 62))
@@ -130,7 +130,7 @@ async function main() {
 
   const overdraw = await api('POST', '/inventory/consume', {
     token: tech.accessToken,
-    body: { itemId: glucose.id, quantity: 999999 },
+    body: { itemId: standard.id, quantity: 999999 },
   });
   overdraw.status === 400 && /insufficient/i.test(overdraw.body?.detail ?? '')
     ? ok('stock cannot go negative', 'over-draw refused')
@@ -142,7 +142,7 @@ async function main() {
 
   // FEFO
   const before = (await api('GET', '/inventory/items', { token: tech.accessToken })).body.find(
-    (i) => i.code === 'RGT-GLU',
+    (i) => i.code === 'STD-PCM-RS',
   );
   const fefoTarget = before.lots
     .filter((l) => !l.isExpired && l.quantityRemaining > 0)
@@ -150,14 +150,14 @@ async function main() {
 
   const consumed = await api('POST', '/inventory/consume', {
     token: tech.accessToken,
-    body: { itemId: glucose.id, quantity: 5, reason: 'Verification run' },
+    body: { itemId: standard.id, quantity: 5, reason: 'Verification run' },
   });
   consumed.body?.lots?.[0]?.lotNumber === fefoTarget?.lotNumber
     ? ok('allocation is first-expiry-first-out', `drew from ${fefoTarget.lotNumber}`)
     : bad('FEFO allocation', `drew ${consumed.body?.lots?.[0]?.lotNumber}, expected ${fefoTarget?.lotNumber}`);
 
   const after = (await api('GET', '/inventory/items', { token: tech.accessToken })).body.find(
-    (i) => i.code === 'RGT-GLU',
+    (i) => i.code === 'STD-PCM-RS',
   );
   Math.abs(before.quantityOnHand - after.quantityOnHand - 5) < 0.001
     ? ok('stock decremented correctly', `${before.quantityOnHand} → ${after.quantityOnHand}`)
@@ -166,7 +166,7 @@ async function main() {
   // RBAC
   const auditorReceive = await api('POST', '/inventory/receive', {
     token: auditor.accessToken,
-    body: { itemId: glucose.id, lotNumber: 'X', quantity: 1 },
+    body: { itemId: standard.id, lotNumber: 'X', quantity: 1 },
   });
   auditorReceive.status === 403
     ? ok('auditor cannot receive stock', '403 — read-only')
@@ -174,17 +174,17 @@ async function main() {
 
   const techReceive = await api('POST', '/inventory/receive', {
     token: tech.accessToken,
-    body: { itemId: glucose.id, lotNumber: 'X', quantity: 1 },
+    body: { itemId: standard.id, lotNumber: 'X', quantity: 1 },
   });
   techReceive.status === 403
-    ? ok('technician can consume but not receive', '403 — needs inventory:manage')
+    ? ok('an analyst can consume but not receive', '403 — needs inventory:manage')
     : bad('technician blocked from receiving', `got ${techReceive.status}`);
 
   // Receiving an already-expired lot must be refused.
   const pastExpiry = await api('POST', '/inventory/receive', {
     token: admin.accessToken,
     body: {
-      itemId: glucose.id,
+      itemId: standard.id,
       lotNumber: `PAST-${Date.now()}`,
       quantity: 10,
       expiryDate: new Date(Date.now() - 5 * 864e5).toISOString(),
@@ -197,143 +197,149 @@ async function main() {
   // ------------------------------------------- automatic consumption
   section('Inventory — consumption traced to a test run');
 
-  const catalog = await api('GET', '/catalog/tests', { token: reception.accessToken });
-  const gluTest = catalog.body.find((t) => t.code === 'GLUF');
+  // A run of the assay draws its column, solvent, standard and filters. The
+  // point is that the ledger falls by itself when the result is entered, rather
+  // than relying on someone writing it in a register afterwards.
+  const labId = stores.user.labs[0].id;
+  const materials = await api('GET', '/stores/materials', { token: stores.accessToken });
+  const material = (materials.body ?? []).find((m) => m.code === 'API-PCM');
 
-  const patient = await api('POST', '/patients', {
-    token: reception.accessToken,
-    body: { fullName: 'Stock Trace Patient', sex: 'FEMALE', ageYears: 36, phone: '9848005555' },
-  });
-  const order = await api('POST', '/orders', {
-    token: reception.accessToken,
+  const receipt = await api('POST', '/stores/receive', {
+    token: stores.accessToken,
     body: {
-      labId: reception.user.labs[0].id,
-      patientId: patient.body.id,
-      items: [{ testDefinitionId: gluTest.id }],
-      createSample: true,
+      labId,
+      supplierName: 'Features Verify Supplier',
+      batches: [
+        {
+          materialId: material.id,
+          batchNumber: `FEAT-${Date.now()}`,
+          quantity: 60,
+          containerCount: 3,
+          manufacturedAt: new Date(Date.now() - 15 * 864e5).toISOString().slice(0, 10),
+          expiryDate: new Date(Date.now() + 450 * 864e5).toISOString().slice(0, 10),
+        },
+      ],
     },
   });
+  const req = await api('POST', '/stores/sampling-requests', {
+    token: stores.accessToken,
+    body: { batchId: receipt.body.batches[0].id, reason: 'RELEASE_TESTING' },
+  });
+  const sampled = await api('POST', `/stores/sampling-requests/${req.body.id}/sample`, {
+    token: tech.accessToken,
+    body: { labId, containersSampled: 2 },
+  });
+  const accession = sampled.body.accessionNumber;
 
-  const accession = order.body.samples[0].accessionNumber;
   const sample = await api('GET', `/samples/by-accession/${accession}`, {
     token: tech.accessToken,
   });
-  await api('POST', `/samples/${sample.body.id}/collect`, { token: tech.accessToken, body: {} });
-  await api('POST', `/samples/${sample.body.id}/receive`, { token: tech.accessToken, body: {} });
+
+  let assayTest = null;
+  for (const t of sample.body.tests ?? []) {
+    const detail = await api('GET', `/tests/${t.id}`, { token: tech.accessToken });
+    if (detail.body?.testDefinition?.code === 'TASSAY') {
+      assayTest = detail.body;
+      break;
+    }
+  }
+  assayTest
+    ? ok('the assay run is booked against the batch', `AR ${accession}`)
+    : bad('assay run booked', 'TASSAY not on this specification');
 
   const stockBefore = (await api('GET', '/inventory/items', { token: tech.accessToken })).body.find(
-    (i) => i.code === 'RGT-GLU',
+    (i) => i.code === 'STD-PCM-RS',
   ).quantityOnHand;
 
-  const testId = sample.body.tests[0].id;
-  const analyteId = sample.body.tests[0].testDefinition.analytes[0].analyte.id;
+  const testId = assayTest.id;
+  const analyteId = assayTest.testDefinition.analytes.find(
+    (a) => a.analyte.code === 'ASSAY',
+  ).analyte.id;
   await api('POST', `/tests/${testId}/results`, {
     token: tech.accessToken,
-    body: { results: [{ analyteId, value: '92' }] },
+    body: { results: [{ analyteId, value: '99.35' }] },
   });
 
   const stockAfter = (await api('GET', '/inventory/items', { token: tech.accessToken })).body.find(
-    (i) => i.code === 'RGT-GLU',
+    (i) => i.code === 'STD-PCM-RS',
   ).quantityOnHand;
 
-  Math.abs(stockBefore - stockAfter - 1) < 0.001
-    ? ok('running a test decremented reagent stock', `${stockBefore} → ${stockAfter}`)
-    : bad('automatic consumption', `${stockBefore} → ${stockAfter}, expected -1`);
+  // 25 mg of reference standard per assay, from the method's reagent usage.
+  Math.abs(stockBefore - stockAfter - 25) < 0.001
+    ? ok('running the assay decremented the standard', `${stockBefore} → ${stockAfter} mg`)
+    : bad('automatic consumption', `${stockBefore} → ${stockAfter}, expected -25`);
 
   // Re-saving the same run must not consume twice.
   await api('POST', `/tests/${testId}/results`, {
     token: tech.accessToken,
-    body: { results: [{ analyteId, value: '94' }] },
+    body: { results: [{ analyteId, value: '99.41' }] },
   });
   const stockAfterEdit = (
     await api('GET', '/inventory/items', { token: tech.accessToken })
-  ).body.find((i) => i.code === 'RGT-GLU').quantityOnHand;
+  ).body.find((i) => i.code === 'STD-PCM-RS').quantityOnHand;
   Math.abs(stockAfter - stockAfterEdit) < 0.001
     ? ok('correcting a result does not consume again', 'idempotent per run')
     : bad('double consumption on correction', `${stockAfter} → ${stockAfterEdit}`);
 
-  // ================================================ PATIENT HISTORY
-  section('Patient cumulative history');
+  // ============================================ TRACEABILITY
+  section('Traceability — which lot produced which result');
 
-  await api('POST', `/tests/${testId}/verify`, { token: tech.accessToken, body: {} });
-  const hash = await api('GET', `/tests/${testId}/content-hash`, { token: patho.accessToken });
-  const signTok = await api('POST', '/auth/signing-token', {
-    token: patho.accessToken,
-    body: {
-      password: PASSWORD,
-      entityType: 'SampleTest',
-      entityId: testId,
-      meaning: 'AUTHORIZED',
-      contentHash: hash.body.contentHash,
-    },
-  });
-  const authorized = await api('POST', `/tests/${testId}/authorize`, {
-    token: patho.accessToken,
-    body: { signingToken: signTok.body.signingToken, meaning: 'AUTHORIZED' },
-  });
+  // The question an investigator asks a year later: this batch failed, what did
+  // you run it on? The lot ledger has to answer it without anyone having kept a
+  // separate notebook.
+  const afterItems = await api('GET', '/inventory/items', { token: tech.accessToken });
+  const stdItem = afterItems.body.find((i) => i.code === 'STD-PCM-RS');
+  const drawnLot = stdItem.lots
+    .filter((l) => !l.isExpired)
+    .sort((a, b) => (a.expiryDate ?? '').localeCompare(b.expiryDate ?? ''))[0];
 
-  const history = await api('GET', `/patients/${patient.body.id}/history`, {
-    token: patho.accessToken,
-  });
-  history.status === 200
-    ? ok('cumulative history returns', `${history.body.rows.length} analytes`)
-    : bad('cumulative history', `${history.status}`);
-
-  if (authorized.body?.status === 'AUTHORIZED') {
-    history.body?.rows?.length > 0
-      ? ok('authorised results appear in the history')
-      : bad('authorised result in history', 'row missing');
-  } else {
-    // Authorisation may be blocked by an unrelated open QC failure.
-    ok('authorisation not available in this state', 'history structure still verified');
-  }
-
-  const hasColumns = Array.isArray(history.body?.columns);
-  hasColumns
-    ? ok('history is a matrix of analyte × visit', `${history.body.columns.length} columns`)
-    : bad('history matrix shape');
-
-  // A second, unauthorised result must NOT leak into the clinical comparison.
-  const order2 = await api('POST', '/orders', {
-    token: reception.accessToken,
-    body: {
-      labId: reception.user.labs[0].id,
-      patientId: patient.body.id,
-      items: [{ testDefinitionId: gluTest.id }],
-      createSample: true,
-    },
-  });
-  const s2 = await api('GET', `/samples/by-accession/${order2.body.samples[0].accessionNumber}`, {
+  const ledger = await api('GET', `/inventory/lots/${drawnLot.id}/history`, {
     token: tech.accessToken,
   });
-  await api('POST', `/samples/${s2.body.id}/collect`, { token: tech.accessToken, body: {} });
-  await api('POST', `/samples/${s2.body.id}/receive`, { token: tech.accessToken, body: {} });
-  await api('POST', `/tests/${s2.body.tests[0].id}/results`, {
-    token: tech.accessToken,
-    body: { results: [{ analyteId, value: '188' }] },
-  });
+  ledger.status === 200 && Array.isArray(ledger.body)
+    ? ok('the lot ledger is readable', `${ledger.body.length} movement(s)`)
+    : bad('lot ledger', `${ledger.status}`);
 
-  const history2 = await api('GET', `/patients/${patient.body.id}/history`, {
-    token: patho.accessToken,
-  });
-  const leaked = JSON.stringify(history2.body?.rows ?? []).includes('"188"');
-  leaked
-    ? bad('unauthorised result leaked into the cumulative view')
-    : ok('unauthorised results excluded', 'only authorised values are comparable');
+  const thisRun = (ledger.body ?? []).find((t) => t.sampleTestId === testId);
+  thisRun
+    ? ok('the consumption names the run that caused it', `${thisRun.quantity} mg on this test`)
+    : bad('consumption traced to the run', 'no ledger row references this test');
 
-  const phiReads = await api('GET', '/compliance/audit?action=READ_SENSITIVE&limit=20', {
+  typeof thisRun?.balanceAfter === 'number'
+    ? ok('each movement records the balance it left behind', `${thisRun.balanceAfter} mg`)
+    : bad('running balance recorded');
+
+  // The ledger is returned newest-first, so it has to be read backwards to be
+  // reconciled: each movement's closing balance must be the previous closing
+  // balance plus its own signed quantity. This is the check an auditor does by
+  // hand, and it is what makes the running balance trustworthy rather than
+  // merely present.
+  const oldestFirst = [...(ledger.body ?? [])].reverse();
+  const breaks = oldestFirst.filter(
+    (t, i) =>
+      i > 0 && Math.abs(t.balanceAfter - (oldestFirst[i - 1].balanceAfter + t.quantity)) > 0.001,
+  );
+  breaks.length === 0
+    ? ok(
+        'the ledger reconciles movement by movement',
+        oldestFirst.map((t) => t.balanceAfter).join(' → '),
+      )
+    : bad('ledger reconciliation', `${breaks.length} movement(s) do not add up`);
+
+  const auditorLedger = await api('GET', `/inventory/lots/${drawnLot.id}/history`, {
     token: auditor.accessToken,
   });
-  (phiReads.body?.items ?? []).some((e) => e.after?.view === 'CUMULATIVE_HISTORY')
-    ? ok('viewing patient history is audited as a PHI access')
-    : bad('history view audited');
+  auditorLedger.status === 200
+    ? ok('an auditor can read the ledger unaided', 'no export request needed')
+    : bad('auditor reads ledger', `${auditorLedger.status}`);
+
 
   // ==================================================== CSV EXPORT
   section('CSV export');
 
   const denied = await api('GET', '/export/worklist.csv', { token: tech.accessToken, raw: true });
   denied.status === 403
-    ? ok('export requires compliance:export', '403 for a technician')
+    ? ok('export requires compliance:export', '403 for a QC analyst')
     : bad('export permission enforced', `got ${denied.status}`);
 
   for (const [name, path] of [
@@ -363,7 +369,7 @@ async function main() {
     }).then((r) => r.arrayBuffer()),
   ).slice(0, 3);
   bomBytes[0] === 0xef && bomBytes[1] === 0xbb && bomBytes[2] === 0xbf
-    ? ok('UTF-8 BOM present', 'Excel renders Indian names correctly')
+    ? ok('UTF-8 BOM present', 'Excel renders the register correctly')
     : bad('BOM for Excel', [...bomBytes].map((b) => b.toString(16)).join(' '));
 
   const auditCsv = await api('GET', '/export/audit.csv', { token: auditor.accessToken, raw: true });

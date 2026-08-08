@@ -427,3 +427,31 @@ export const DEFAULT_ROLES: Record<
     ],
   },
 };
+
+/**
+ * Which roles a tenant is provisioned with depends on the vertical it runs.
+ *
+ * Roles are per-tenant rows, so this is a provisioning decision, not a runtime
+ * filter: a pharma manufacturing site has no phlebotomist and bills no patient,
+ * and offering those in the "add a user" dropdown is how a demo loses a room.
+ * The templates all remain defined — a diagnostics tenant still gets its own —
+ * but a pharma tenant is only ever given the five that mean something on a
+ * shop floor.
+ */
+export const PHARMA_ROLE_CODES = [
+  'LAB_ADMIN',
+  'QA',
+  'QC_ANALYST',
+  'STORES',
+  'AUDITOR',
+] as const;
+
+export const DIAGNOSTICS_ROLE_CODES = [
+  'LAB_ADMIN',
+  'PATHOLOGIST',
+  'LAB_TECHNICIAN',
+  'PHLEBOTOMIST',
+  'RECEPTIONIST',
+  'ACCOUNTANT',
+  'AUDITOR',
+] as const;

@@ -176,9 +176,9 @@ export default async function TestPage({ params }: { params: Promise<{ id: strin
         </div>
       )}
 
-      <div className="grid gap-5 lg:grid-cols-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-3">
         {/* Results */}
-        <div className="space-y-5 lg:col-span-2">
+        <div className="min-w-0 space-y-5 lg:col-span-2">
           <Card title={canEnter ? 'Results' : 'Results (read-only)'}>
             <ResultEntryForm
               action={enterResults.bind(null, test.id)}

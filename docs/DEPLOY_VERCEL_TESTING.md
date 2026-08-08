@@ -55,7 +55,6 @@ Then, from the repository root:
 npm install
 node scripts/setup-neon.mjs "postgresql://neondb_owner:...@ep-....aws.neon.tech/neondb?sslmode=require"
 
-# add --with-pharma if you want the stores / QA / QC demo data too
 ```
 
 That single command:
@@ -66,7 +65,8 @@ That single command:
 2. applies migrations over the direct connection;
 3. applies RLS policies and the append-only grants on `audit_log`, `signature`,
    `batch_disposition` and `certificate_of_analysis`;
-4. seeds the tenant, roles, catalog, demo patients and inventory;
+4. seeds the tenant, manufacturing roles, methods, specifications, materials, batches and
+   lab consumables;
 5. writes **`.env.vercel.api`** and **`.env.vercel.web`** with freshly generated secrets.
 
 It refuses a pooled URL, because PgBouncer in transaction mode cannot run DDL and the failure
@@ -218,14 +218,15 @@ node scripts/feature-audit.mjs https://labsetu-api-xxxx.vercel.app https://labse
 Sign in at your web URL:
 
 ```
-Tenant     SUNRISE
-Email      admin@sunrise.test
+Tenant     VANTAGE
+Email      admin@vantage.test
 Password   LabSetu@2026
 ```
 
-Other seeded accounts, same password: `pathologist@`, `tech@`, `front@`, `auditor@`, and —
-with `--with-pharma` — `stores@`, `qc@`, `qa@sunrise.test`. Each lands on a dashboard for
-their own job, which is worth showing.
+Other seeded accounts, same password: `qa@`, `qc@`, `qc2@`, `stores@` and
+`auditor@vantage.test`. Each lands on a dashboard for their own job, which is
+worth showing — the stores officer sees consignments awaiting sampling, the
+analyst sees a worklist, QA sees batches waiting on a release decision.
 
 ---
 

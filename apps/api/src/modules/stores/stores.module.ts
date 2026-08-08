@@ -354,6 +354,12 @@ class QaController {
   }
 
   @RequirePermissions(PERMISSIONS.STORES_READ)
+  @Get('coa')
+  listCoa(@Query('search') search?: string, @Query('limit') limit?: string) {
+    return this.coa.list({ search, limit: limit ? Number(limit) : undefined });
+  }
+
+  @RequirePermissions(PERMISSIONS.STORES_READ)
   @Get('coa/:id')
   getCoa(@Param('id', ParseUUIDPipe) id: string) {
     return this.coa.findOne(id);

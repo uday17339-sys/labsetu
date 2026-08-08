@@ -15,7 +15,7 @@
  * Usage: node scripts/pharma-verify.mjs [apiBase]
  */
 const API = process.argv[2] ?? 'http://localhost:4000';
-const TENANT = 'SUNRISE';
+const TENANT = 'VANTAGE';
 const PASSWORD = 'LabSetu@2026';
 
 let passed = 0;
@@ -64,10 +64,10 @@ const uniq = () => Date.now().toString().slice(-6) + Math.floor(Math.random() * 
 
 // ---------------------------------------------------------------------------
 
-const admin = await login('admin@sunrise.test');
-const stores = await login('stores@sunrise.test');
-const qc = await login('qc@sunrise.test');
-const qa = await login('qa@sunrise.test');
+const admin = await login('admin@vantage.test');
+const stores = await login('stores@vantage.test');
+const qc = await login('qc@vantage.test');
+const qa = await login('qa@vantage.test');
 
 if (!stores?.accessToken || !qc?.accessToken || !qa?.accessToken) {
   console.error(
@@ -358,11 +358,32 @@ sample.status === 200 && sample.body.tests.length > 0
 // ===========================================================================
 section('QC testing and the automatic OOS');
 
-const testId = sample.body?.tests?.[0]?.id;
-const testDetail = await api('GET', `/tests/${testId}`, { token: qc.accessToken });
-const testAnalytes = testDetail.body?.testDefinition?.analytes ?? [];
+// Sampling creates one sample test per test in the specification, so tests[0]
+// is whichever sorts first — Description, whose only analyte is DESC. Driving
+// ASSAY out of specification requires the test that actually MEASURES assay.
+// Taking [0] silently entered a description and then reported the OOS engine as
+// broken when nothing out of specification had been entered at all.
+let testId = null;
+let testAnalytes = [];
+for (const candidate of sample.body?.tests ?? []) {
+  const detail = await api('GET', `/tests/${candidate.id}`, { token: qc.accessToken });
+  const analytes = detail.body?.testDefinition?.analytes ?? [];
+  if (analytes.some((a) => a.analyte.code === 'ASSAY')) {
+    testId = candidate.id;
+    testAnalytes = analytes;
+    break;
+  }
+}
 
-const specForMaterial = specs.body.find(
+testId
+  ? ok('found the assay test on the sample', `${testAnalytes.length} parameters`)
+  : bad('assay test present', 'the specification produced no test measuring ASSAY');
+
+// The spec in force for the BATCH's material. The approval section above
+// deliberately creates a spec against a scratch material so it can exercise
+// self-approval refusal without disturbing the real one.
+const freshSpecs = await api('GET', '/specifications', { token: qa.accessToken });
+const specForMaterial = (freshSpecs.body ?? specs.body).find(
   (s) => s.material.code === api_pcm.code && s.inForce,
 );
 const specDetail = specForMaterial
@@ -575,49 +596,63 @@ const cleanSampled = await api('POST', `/stores/sampling-requests/${cleanReq.bod
 const cleanSample = await api('GET', `/samples/by-accession/${cleanSampled.body.accessionNumber}`, {
   token: qc.accessToken,
 });
-const cleanTestId = cleanSample.body?.tests?.[0]?.id;
-const cleanDetail = await api('GET', `/tests/${cleanTestId}`, { token: qc.accessToken });
+// A specification produces one test per group of criteria, so releasing a batch
+// means completing ALL of them. Filling only tests[0] left 7 criteria untested,
+// and the release gate correctly refused — the gate was right and the test was
+// filling in one eighth of the work.
+const cleanTests = cleanSample.body?.tests ?? [];
+const falseOos = [];
 
-const cleanValues = (cleanDetail.body?.testDefinition?.analytes ?? []).map((a) => {
-  const limit = limitByCode.get(a.analyte.code);
-  if (limit?.minValue != null && limit?.maxValue != null) {
-    return { analyteId: a.analyte.id, value: String((limit.minValue + limit.maxValue) / 2) };
-  }
-  if (limit?.maxValue != null) {
-    return { analyteId: a.analyte.id, value: String(limit.maxValue / 2) };
-  }
-  if (limit?.minValue != null) return { analyteId: a.analyte.id, value: String(limit.minValue) };
-  return { analyteId: a.analyte.id, value: 'Complies' };
-});
+for (const t of cleanTests) {
+  const detail = await api('GET', `/tests/${t.id}`, { token: qc.accessToken });
+  const values = (detail.body?.testDefinition?.analytes ?? []).map((a) => {
+    const limit = limitByCode.get(a.analyte.code);
+    if (limit?.minValue != null && limit?.maxValue != null) {
+      return { analyteId: a.analyte.id, value: String((limit.minValue + limit.maxValue) / 2) };
+    }
+    if (limit?.maxValue != null) return { analyteId: a.analyte.id, value: String(limit.maxValue / 2) };
+    if (limit?.minValue != null) return { analyteId: a.analyte.id, value: String(limit.minValue) };
+    return { analyteId: a.analyte.id, value: 'Complies' };
+  });
+  if (values.length === 0) continue;
 
-const cleanEntered = await api('POST', `/tests/${cleanTestId}/results`, {
-  token: qc.accessToken,
-  body: { results: cleanValues },
-});
-(cleanEntered.body?.oosInvestigationsOpened ?? []).length === 0
+  const res = await api('POST', `/tests/${t.id}/results`, {
+    token: qc.accessToken,
+    body: { results: values },
+  });
+  falseOos.push(...(res.body?.oosInvestigationsOpened ?? []));
+
+  await api('POST', `/tests/${t.id}/verify`, { token: qc.accessToken, body: {} });
+}
+
+falseOos.length === 0
   ? ok('an in-specification batch opens NO investigation', 'the detector is not trigger-happy')
-  : bad('no false OOS', JSON.stringify(cleanEntered.body?.oosInvestigationsOpened));
+  : bad('no false OOS', falseOos.join(', '));
 
-await api('POST', `/tests/${cleanTestId}/verify`, { token: qc.accessToken, body: {} });
+// Every test needs its own signature: a signing token is bound to one record.
+let authorisedCount = 0;
+for (const t of cleanTests) {
+  const hash = await api('GET', `/tests/${t.id}/content-hash`, { token: qa.accessToken });
+  const tok = await api('POST', '/auth/signing-token', {
+    token: qa.accessToken,
+    body: {
+      password: PASSWORD,
+      entityType: 'SampleTest',
+      entityId: t.id,
+      meaning: 'AUTHORIZED',
+      contentHash: hash.body?.contentHash,
+    },
+  });
+  const r = await api('POST', `/tests/${t.id}/authorize`, {
+    token: qa.accessToken,
+    body: { signingToken: tok.body?.signingToken, meaning: 'AUTHORIZED' },
+  });
+  if (r.status === 200 || r.status === 201) authorisedCount++;
+}
 
-const authHash = await api('GET', `/tests/${cleanTestId}/content-hash`, { token: qa.accessToken });
-const authTok = await api('POST', '/auth/signing-token', {
-  token: qa.accessToken,
-  body: {
-    password: PASSWORD,
-    entityType: 'SampleTest',
-    entityId: cleanTestId,
-    meaning: 'AUTHORIZED',
-    contentHash: authHash.body?.contentHash,
-  },
-});
-const authorised = await api('POST', `/tests/${cleanTestId}/authorize`, {
-  token: qa.accessToken,
-  body: { signingToken: authTok.body?.signingToken, meaning: 'AUTHORIZED' },
-});
-authorised.status === 201 || authorised.status === 200
-  ? ok('QA authorises the analytical result')
-  : bad('result authorised', `${authorised.status} ${JSON.stringify(authorised.body).slice(0, 110)}`);
+authorisedCount === cleanTests.length
+  ? ok('QA authorises every analytical result', `${authorisedCount} tests signed`)
+  : bad('result authorised', `${authorisedCount} of ${cleanTests.length} authorised`);
 
 const released = await (async () => {
   const hash = await api('GET', `/qa/batches/${cleanId}/content-hash`, { token: qa.accessToken });

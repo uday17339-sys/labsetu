@@ -42,19 +42,35 @@ const section = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
 const overflowOf = (page) =>
   page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Signs in, backing off if the auth rate limiter says no.
+ *
+ * The limiter is 10/minute per IP and this suite signs in twice. Run back to
+ * back with the other suites, the second login gets throttled, the cookie built
+ * from the error body is nonsense, and every page then redirects to /login —
+ * which surfaces as "form field not found" thirty seconds later. That is a
+ * false alarm with an expensive-looking failure mode.
+ */
+async function signIn(email, attempt = 0) {
+  const res = await fetch(`${API}/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tenantCode: 'VANTAGE', email, password: 'LabSetu@2026' }),
+  });
+  if (res.status === 429 && attempt < 4) {
+    await sleep(21_000);
+    return signIn(email, attempt + 1);
+  }
+  return res.json();
+}
+
 async function main() {
   mkdirSync(OUT, { recursive: true });
   console.log(`\n\x1b[1mLabSetu extended responsiveness audit\x1b[0m  →  ${WEB}\n`);
 
-  const auth = await fetch(`${API}/v1/auth/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      tenantCode: 'SUNRISE',
-      email: 'pathologist@sunrise.test',
-      password: 'LabSetu@2026',
-    }),
-  }).then((r) => r.json());
+  const auth = await signIn('qa@vantage.test');
 
   if (auth.status !== 'OK') {
     console.error('Could not sign in:', JSON.stringify(auth).slice(0, 200));
@@ -75,31 +91,40 @@ async function main() {
   const worklist = await fetch(`${API}/v1/worklist?limit=20`, { headers }).then((r) => r.json());
   const samples = await fetch(`${API}/v1/samples?limit=20`, { headers }).then((r) => r.json());
 
-  const testId = worklist.items?.[0]?.id;
+  // A test that is still open for entry. Taking items[0] landed on whichever
+  // test sorted first, which after a full verification run is usually one that
+  // is already authorised — its form is read-only, so the long-text overflow
+  // check silently skipped the very layout it exists to protect.
+  const EDITABLE = new Set(['PENDING', 'IN_PROGRESS', 'RESULT_ENTERED', 'RERUN_REQUESTED']);
+  const editable = (worklist.items ?? []).find((t) => EDITABLE.has(t.status));
+  const testId = (editable ?? worklist.items?.[0])?.id;
   const sampleId = samples.items?.[0]?.id;
   const orderId = samples.items?.[0]?.orderId ?? null;
 
-  // Find a released report to render the heaviest screen in the app.
-  let reportId = null;
-  for (const s of samples.items ?? []) {
-    const detail = await fetch(`${API}/v1/samples/${s.id}`, { headers }).then((r) => r.json());
-    const oid = detail?.order?.id;
-    if (!oid) continue;
-    const order = await fetch(`${API}/v1/orders/${oid}`, { headers }).then((r) => r.json());
-    if (order?.reports?.length) {
-      reportId = order.reports[0].id;
-      break;
-    }
-  }
+  // The Certificate of Analysis is the heaviest screen in the pharma product —
+  // a full specification table with a result and a verdict per row, and the one
+  // page that also has to print. If any screen overflows at 320px it is this.
+  const coaList = await fetch(`${API}/v1/qa/coa?limit=1`, { headers })
+    .then((r) => r.json())
+    .catch(() => ({ items: [] }));
+  const coaId = coaList.items?.[0]?.id ?? null;
+
+  // A batch under QA review: the densest table an approver reads on a phone.
+  const batches = await fetch(`${API}/v1/stores/batches?limit=20`, { headers })
+    .then((r) => r.json())
+    .catch(() => ({ items: [] }));
+  const batchId = (batches.items ?? batches)?.[0]?.id ?? null;
 
   const DEEP = [
     ['/worklist', 'Worklist'],
     testId ? [`/tests/${testId}`, 'Test detail / result entry'] : null,
     sampleId ? [`/samples/${sampleId}`, 'Sample detail'] : null,
-    orderId ? [`/orders/${orderId}`, 'Order confirmation'] : null,
-    reportId ? [`/reports/${reportId}`, 'Report (heaviest screen)'] : null,
+    orderId ? [`/orders/${orderId}`, 'Sampling record'] : null,
+    ['/coa', 'Certificate register'],
+    coaId ? [`/coa/${coaId}`, 'Certificate of Analysis (heaviest screen)'] : null,
+    batchId ? [`/qa/${batchId}`, 'Batch review'] : null,
     ['/qc', 'Quality control'],
-    ['/register', 'Registration'],
+    ['/stores', 'Stores'],
     ['/audit', 'Audit trail'],
   ].filter(Boolean);
 
@@ -217,24 +242,66 @@ async function main() {
     await ctx.addCookies(cookies);
     const page = await ctx.newPage();
 
-    // Registration with nothing selected: does the error path break layout?
-    await page.goto(`${WEB}/register`, { waitUntil: 'networkidle' });
-    await page.fill('input[name="fullName"]', 'Layout Test Patient');
-    await page.fill('input[name="ageYears"]', '44');
+    // The consignment form needs stores:manage, which QA does not hold — that
+    // separation is deliberate. So this section signs in as the stores officer
+    // rather than reusing the QA session the rest of the audit runs under.
+    const storesAuth = await signIn('stores@vantage.test');
+    if (storesAuth.status !== 'OK') {
+      bad('stores sign-in for the form test', JSON.stringify(storesAuth).slice(0, 90));
+    }
+
+    await ctx.clearCookies();
+    await ctx.addCookies([
+      { name: 'labsetu_at', value: storesAuth.accessToken, url: origin },
+      { name: 'labsetu_rt', value: storesAuth.refreshToken, url: origin },
+      {
+        name: 'labsetu_user',
+        value: encodeURIComponent(JSON.stringify(storesAuth.user)),
+        url: origin,
+      },
+    ]);
+
+    // Goods receipt submitted with the required fields missing: does the error
+    // path break the layout? (Patient registration no longer exists on a pharma
+    // deployment, so the equivalent form is the stores consignment receipt.)
+    await page.goto(`${WEB}/stores`, { waitUntil: 'networkidle' });
+    await page.fill('input[name="batchNumber"]', `RESP-${Date.now()}`);
     await page.click('button[type="submit"]');
     await page.waitForLoadState('networkidle');
 
     const o = await overflowOf(page);
     o <= 1
-      ? ok('registration error state fits', 'no test selected')
-      : bad('registration error state overflows', `${o}px`);
+      ? ok('goods receipt error state fits', 'required fields missing')
+      : bad('goods receipt error state overflows', `${o}px`);
 
-    const errorShown = await page.locator('[role="alert"]').count();
-    errorShown > 0
-      ? ok('validation error is surfaced to the user')
-      : note('no visible error banner on empty test selection — check UX manually');
+    const errorShown =
+      (await page.locator('[role="alert"]').count()) > 0 ||
+      (await page.locator('input:invalid').count()) > 0;
+    errorShown
+      ? ok('validation is surfaced to the user')
+      : note('no visible validation on an incomplete receipt — check UX manually');
 
-    await page.screenshot({ path: `${OUT}/375-register-error.png` });
+    await page.screenshot({ path: `${OUT}/375-stores-error.png` });
+
+    // The result form belongs to the analyst, not to QA. QA holds result:verify
+    // and result:authorize but NOT result:write, so for them the form renders
+    // read-only and the interpretation field does not exist — which made this
+    // check quietly skip itself every run. Signing in as the person who
+    // actually types into the form is the only way to test the form.
+    const analystAuth = await signIn('qc@vantage.test');
+    if (analystAuth.status !== 'OK') {
+      bad('analyst sign-in for the result form test', JSON.stringify(analystAuth).slice(0, 90));
+    }
+    await ctx.clearCookies();
+    await ctx.addCookies([
+      { name: 'labsetu_at', value: analystAuth.accessToken, url: origin },
+      { name: 'labsetu_rt', value: analystAuth.refreshToken, url: origin },
+      {
+        name: 'labsetu_user',
+        value: encodeURIComponent(JSON.stringify(analystAuth.user)),
+        url: origin,
+      },
+    ]);
 
     // Long content: an interpretation field with a lot of text must not blow out.
     if (testId) {
@@ -242,7 +309,7 @@ async function main() {
       const ta = page.locator('textarea[name="interpretation"]');
       if (await ta.count()) {
         await ta.fill(
-          'Marked leucocytosis with neutrophilia and toxic granulation, suggestive of acute bacterial infection. Correlate clinically and consider repeat after therapy. '.repeat(
+          'Chromatogram reviewed against system suitability: theoretical plates 4820, tailing 1.12, %RSD of five replicate standard injections 0.38. Peak purity index 0.9998 against the reference standard. Result reported on the dried basis using the water content determined by Karl Fischer on the same composite. '.repeat(
             3,
           ),
         );
@@ -258,14 +325,14 @@ async function main() {
     await ctx.close();
   }
 
-  // ------------------------------------------------- print (report handout)
-  section('Print stylesheet — the report a patient receives');
+  // --------------------------------------- print (the certificate a customer gets)
+  section('Print stylesheet — the certificate that leaves with the material');
 
-  if (reportId) {
+  if (coaId) {
     const ctx = await browser.newContext({ viewport: { width: 1024, height: 1400 }, ignoreHTTPSErrors: true });
     await ctx.addCookies(cookies);
     const page = await ctx.newPage();
-    await page.goto(`${WEB}/reports/${reportId}`, { waitUntil: 'networkidle' });
+    await page.goto(`${WEB}/coa/${coaId}`, { waitUntil: 'networkidle' });
     await page.emulateMedia({ media: 'print' });
 
     const navHidden = await page.evaluate(() => {
@@ -275,13 +342,13 @@ async function main() {
       return hidden(header) && hidden(nav);
     });
     navHidden
-      ? ok('navigation is hidden when printing', 'no app chrome on the handout')
-      : bad('navigation hidden in print', 'chrome would print on the patient report');
+      ? ok('navigation is hidden when printing', 'no app chrome on the certificate')
+      : bad('navigation hidden in print', 'chrome would print on a document sent to a customer');
 
-    await page.screenshot({ path: `${OUT}/print-report.png`, fullPage: true });
+    await page.screenshot({ path: `${OUT}/print-coa.png`, fullPage: true });
     await ctx.close();
   } else {
-    note('no released report found to test the print layout');
+    note('no certificate found to test the print layout');
   }
 
   await browser.close();

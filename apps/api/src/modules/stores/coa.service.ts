@@ -116,6 +116,65 @@ export class CoaService {
     };
   }
 
+  /**
+   * The certificate register.
+   *
+   * A customer rings up quoting a batch number, or an auditor asks to see every
+   * certificate issued this quarter. Both need to start from a list rather than
+   * from the batch record, which is why this exists separately from the batch
+   * screen. Only the current version of each certificate is listed — superseded
+   * versions are reachable from the certificate itself, and showing all of them
+   * here would make a single reissued CoA look like two different documents.
+   */
+  async list(params: { search?: string; limit?: number } = {}) {
+    const tx = this.prisma.tx;
+    const limit = Math.min(params.limit ?? 50, 100);
+    const search = params.search?.trim();
+
+    const rows = await tx.certificateOfAnalysis.findMany({
+      where: search
+        ? {
+            OR: [
+              { coaNumber: { contains: search, mode: 'insensitive' } },
+              { batch: { batchNumber: { contains: search, mode: 'insensitive' } } },
+              { batch: { material: { code: { contains: search, mode: 'insensitive' } } } },
+              { batch: { material: { name: { contains: search, mode: 'insensitive' } } } },
+            ],
+          }
+        : undefined,
+      include: {
+        batch: { include: { material: true } },
+        specification: { select: { code: true, version: true } },
+      },
+      orderBy: [{ issuedAt: 'desc' }],
+      // Over-fetch so that collapsing versions still fills a page. A batch that
+      // has been recertified several times could otherwise return a short page;
+      // with 2x headroom that needs every certificate on the page to be a
+      // reissue, and the register is a lookup tool rather than a paged feed.
+      take: limit * 2,
+    });
+
+    // Collapse to the latest version per certificate number.
+    const latest = new Map<string, (typeof rows)[number]>();
+    for (const r of rows) {
+      const held = latest.get(r.coaNumber);
+      if (!held || r.version > held.version) latest.set(r.coaNumber, r);
+    }
+
+    return {
+      items: [...latest.values()].slice(0, limit).map((c) => ({
+        id: c.id,
+        coaNumber: c.coaNumber,
+        version: c.version,
+        issuedAt: c.issuedAt.toISOString(),
+        batchNumber: c.batch.batchNumber,
+        material: { code: c.batch.material.code, name: c.batch.material.name },
+        specification: `${c.specification.code} v${c.specification.version}`,
+        batchStatus: c.batch.status,
+      })),
+    };
+  }
+
   /** The printable certificate. */
   async findOne(id: string) {
     const tx = this.prisma.tx;

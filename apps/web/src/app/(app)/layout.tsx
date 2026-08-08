@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { getSessionUser, clearSession, can } from '@/lib/session';
 import { NavLink, BottomNavLink, MoreMenu, MoreTab, type NavItem } from '@/components/nav';
+import { isPharma } from '@/lib/vertical';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,27 +30,50 @@ async function signOut(): Promise<void> {
 const PRIMARY = [
   { href: '/', label: 'Dashboard', short: 'Home', icon: 'home', permission: null },
   { href: '/worklist', label: 'Worklist', short: 'Work', icon: 'list', permission: 'result:read' },
-  { href: '/register', label: 'Register', short: 'New', icon: 'plus', permission: 'order:create' },
-  { href: '/samples', label: 'Samples', short: 'Scan', icon: 'scan', permission: 'sample:read' },
-  {
-    href: '/critical',
-    label: 'Critical',
-    short: 'Critical',
-    icon: 'alert',
-    permission: 'result:read',
-  },
-] as const;
-
-const SECONDARY = [
-  // Manufacturing QC. Permission-gated like everything else, so a diagnostic
-  // lab never sees a stores tab and a pharma site never sees phlebotomy.
+  // Pharma: the stores bench and QA release desk are daily screens. Patient
+  // registration is not a thing that happens in a plant.
   { href: '/stores', label: 'Stores', short: 'Stores', icon: 'box', permission: 'stores:read' },
+  { href: '/samples', label: 'Samples', short: 'Scan', icon: 'scan', permission: 'sample:read' },
   {
     href: '/qa',
     label: 'QA release',
     short: 'QA',
     icon: 'shield',
     permission: 'batch:disposition',
+  },
+] as const;
+
+/** Screens that only make sense for a diagnostics deployment. */
+const DIAGNOSTICS_ONLY = new Set([
+  '/register',
+  '/patients',
+  '/critical',
+  '/billing',
+  '/analytics',
+  // The patient report register. A plant issues certificates of analysis
+  // instead, and /reports would render an permanently empty list beside them.
+  '/reports',
+]);
+
+/** Screens that only make sense for a pharma manufacturing deployment. */
+const PHARMA_ONLY = new Set(['/coa', '/specifications']);
+
+const SECONDARY = [
+  // Occasional but real work. Entries in DIAGNOSTICS_ONLY are dropped entirely
+  // on a pharma deployment rather than merely demoted.
+  {
+    href: '/register',
+    label: 'Register',
+    short: 'New',
+    icon: 'plus',
+    permission: 'order:create',
+  },
+  {
+    href: '/critical',
+    label: 'Critical results',
+    short: 'Critical',
+    icon: 'alert',
+    permission: 'result:read',
   },
   {
     href: '/specifications',
@@ -66,6 +90,13 @@ const SECONDARY = [
     permission: 'patient:read',
   },
   { href: '/reports', label: 'Reports', short: 'Reports', icon: 'doc', permission: 'report:read' },
+  {
+    href: '/coa',
+    label: 'Certificates',
+    short: 'CoA',
+    icon: 'doc',
+    permission: 'stores:read',
+  },
   { href: '/billing', label: 'Billing', short: 'Billing', icon: 'rupee', permission: 'invoice:read' },
   {
     href: '/analytics',
@@ -97,12 +128,17 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const user = await getSessionUser();
   if (!user) redirect('/login');
 
-  const primary: NavItem[] = PRIMARY.filter(
-    (item) => !item.permission || can(user, item.permission),
-  );
-  const secondary: NavItem[] = SECONDARY.filter(
-    (item) => !item.permission || can(user, item.permission),
-  );
+  const hidden = isPharma ? DIAGNOSTICS_ONLY : PHARMA_ONLY;
+
+  // Two filters, doing different jobs. Permission answers "may this person open
+  // it"; vertical answers "does this screen exist in this product at all". An
+  // administrator holds every permission, so without the second filter they
+  // would still be shown patient registration on a pharma deployment.
+  const visible = (item: { href: string; permission: string | null }) =>
+    !hidden.has(item.href) && (!item.permission || can(user, item.permission));
+
+  const primary: NavItem[] = PRIMARY.filter(visible);
+  const secondary: NavItem[] = SECONDARY.filter(visible);
 
   return (
     <div className="min-h-screen">

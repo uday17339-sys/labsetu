@@ -7,7 +7,12 @@ which identified a **"missing middle"**: mid-sized Indian labs that have outgrow
 spreadsheets but are priced out of LabWare/Thermo/LabVantage, and underserved by
 diagnostics-only Indian tools that lack regulation-grade depth.
 
-**Beachhead vertical:** diagnostics / pathology. **Phase two:** mid-size pharma QC.
+**Vertical:** pharmaceutical manufacturing QC — raw-material stores, specifications,
+batch release and the Certificate of Analysis. The diagnostics surface the platform
+was first built against still exists in the codebase and is switched off by
+`APP_VERTICAL`; a pharma tenant is provisioned with manufacturing roles only, and
+patient registration, billing and the report register are not part of the product it
+presents.
 
 ---
 
@@ -69,14 +74,20 @@ npm run dev                  # API :4000, web :3100
 
 ### Sign in
 
-Tenant `SUNRISE`, password `LabSetu@2026`:
+Tenant `VANTAGE`, password `LabSetu@2026`:
 
 | Account | Role | Can do |
 |---|---|---|
-| `pathologist@sunrise.test` | Pathologist | Authorise and release reports |
-| `tech@sunrise.test` | Technician | Enter and verify — **cannot** authorise |
-| `front@sunrise.test` | Front desk | Registration, ordering, billing |
-| `auditor@sunrise.test` | Auditor | Read-only, full audit trail |
+| `qa@vantage.test` | Quality Assurance | Release batches, close investigations, sign the CoA |
+| `qc@vantage.test` | QC Analyst | Sample, test and verify — **cannot** release a batch |
+| `stores@vantage.test` | Stores | Goods receipt, quarantine, issue to production |
+| `admin@vantage.test` | Administrator | Staff, competency, catalogue, specifications |
+| `auditor@vantage.test` | Auditor | Read-only, full audit trail |
+
+The seed is a working formulations plant: two units, nine materials under six
+specifications, batches in quarantine / under test / approved / rejected, a
+closed OOS investigation with its root cause, one still open, and a released
+Certificate of Analysis.
 
 > Ports 55432 (Postgres) and 3100 (web) are deliberately non-default so a
 > locally-installed Postgres on 5432 and a dev server on 3000 keep working.

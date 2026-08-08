@@ -146,7 +146,6 @@ $C run --rm --entrypoint npx migrate tsx packages/db/prisma/seed.ts
 # The rest are plain ESM.
 $C run --rm --entrypoint node migrate packages/db/scripts/sync-roles.mjs
 $C run --rm --entrypoint node migrate packages/db/scripts/seed-inventory.mjs
-$C run --rm --entrypoint node migrate packages/db/scripts/seed-pharma.mjs   # manufacturing sites only
 ```
 
 Two things worth knowing about these:

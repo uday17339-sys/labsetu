@@ -1,10 +1,20 @@
 /**
- * Seeds a realistic mid-size Indian diagnostic lab.
+ * Seeds a realistic mid-size Indian pharmaceutical manufacturer.
  *
- * Not a toy fixture: the catalog, reference ranges, QC lots and analyzer channel
- * mappings mirror what a real NABL-accredited pathology lab runs, so the system
- * is demo-able to a lab owner on day one — and so performance work has
- * representative shapes to measure against.
+ * Not a toy fixture. The materials, specifications, batches and QC tests mirror
+ * what a formulations plant working to revised Schedule M actually runs, so the
+ * system is demo-able to a Head of Quality on day one — and so the QA screens
+ * have something real to show rather than an empty state.
+ *
+ * The data deliberately includes the awkward cases, because those are what a
+ * knowledgeable visitor asks about:
+ *
+ *   - a batch sitting in QUARANTINE awaiting sampling
+ *   - a batch UNDER_TEST with results part-entered
+ *   - a batch APPROVED with a released Certificate of Analysis
+ *   - a batch REJECTED off the back of a closed OOS investigation
+ *   - a batch APPROVED_WITH_DEVIATION, where a non-critical limit was exceeded
+ *     and QA accepted it with a written rationale
  *
  * Everything runs inside ONE transaction with app.tenant_id set, because RLS is
  * active for the seed too (ADR 0002). There is no privileged back door.
@@ -13,14 +23,11 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import {
   generateKey,
   wrapKey,
-  encrypt,
-  blindIndex,
   masterKeyFromBase64,
   hashPassword,
   AUDIT_GENESIS_HASH,
 } from '@labsetu/crypto';
-import { DEFAULT_ROLES } from '@labsetu/contracts';
-import { randomUUID } from 'node:crypto';
+import { DEFAULT_ROLES, PHARMA_ROLE_CODES } from '@labsetu/contracts';
 
 const prisma = new PrismaClient();
 
@@ -28,28 +35,25 @@ const TENANT_ID = '0195c0de-0000-7000-8000-000000000001';
 const DEMO_PASSWORD = 'LabSetu@2026';
 
 const masterKey = masterKeyFromBase64(requireEnv('ENCRYPTION_MASTER_KEY'));
-const blindIndexKey = masterKeyFromBase64(requireEnv('BLIND_INDEX_KEY'));
 
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v || v.startsWith('CHANGE_ME')) {
-    throw new Error(
-      `${name} is missing or still a placeholder. Run: node scripts/setup-env.mjs`,
-    );
+    throw new Error(`${name} is missing or still a placeholder. Run: node scripts/setup-env.mjs`);
   }
   return v;
 }
 
-async function main() {
-  console.log('\n  Seeding LabSetu demo tenant...\n');
+const d = (v: number | string) => new Prisma.Decimal(v);
+const daysAgo = (n: number) => new Date(Date.now() - n * 864e5);
+const daysAhead = (n: number) => new Date(Date.now() + n * 864e5);
 
-  // The seed deliberately refuses to overwrite an existing tenant.
-  //
-  // It CANNOT clean up after itself, because audit_log is append-only at the
-  // database level — labsetu_app has no DELETE grant on it (ADR 0003). Wiping
-  // and re-seeding would leave orphaned audit entries and a reset chain head,
-  // i.e. a broken chain. That the seed cannot work around this is the guarantee
-  // working as designed, so the honest path is a full reset via the owner role.
+async function main() {
+  console.log('\n  Seeding LabSetu — pharmaceutical manufacturing\n');
+
+  // The seed deliberately refuses to overwrite an existing tenant: audit_log is
+  // append-only at the database level (ADR 0003), so it cannot clean up after
+  // itself. That the seed cannot work around this is the guarantee working.
   const existing = await prisma.$queryRaw<{ count: bigint }[]>`
     SELECT count(*)::bigint AS count FROM tenant WHERE id = ${TENANT_ID}::uuid
   `;
@@ -57,40 +61,41 @@ async function main() {
     console.error(
       '  The demo tenant already exists.\n\n' +
         '  The audit trail is append-only, so the seed cannot delete it and start over.\n' +
-        '  To rebuild the database from scratch:\n\n' +
-        '      npm run db:reset\n',
+        '  To rebuild from scratch:  npm run db:reset\n',
     );
     process.exit(1);
   }
 
   await prisma.$transaction(
     async (tx) => {
-      // RLS applies to the seed as well; without this every insert is rejected
-      // by the WITH CHECK clause. That is the correct behaviour.
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${TENANT_ID}, true)`;
 
-      // -----------------------------------------------------------------------
-      // Tenant
-      // -----------------------------------------------------------------------
+      // ---------------------------------------------------------------- tenant
       const tenantDek = generateKey();
 
       const tenant = await tx.tenant.create({
         data: {
           id: TENANT_ID,
-          code: 'SUNRISE',
-          name: 'Sunrise Diagnostics',
-          legalName: 'Sunrise Diagnostics Pvt Ltd',
-          gstin: '36AABCS1429B1ZX',
-          pan: 'AABCS1429B',
-          addressLine1: 'Plot 42, Jubilee Hills',
+          code: 'VANTAGE',
+          name: 'Vantage Pharmaceuticals',
+          legalName: 'Vantage Pharmaceuticals Pvt Ltd',
+          gstin: '36AABCV7391K1ZP',
+          pan: 'AABCV7391K',
+          addressLine1: 'Plot 27, Genome Valley, Shamirpet',
           city: 'Hyderabad',
           state: 'Telangana',
           stateCode: '36',
-          pincode: '500033',
-          phone: '+914023551234',
-          email: 'info@sunrisediagnostics.example',
-          nablCertNo: 'MC-4821',
-          nablValidTill: new Date('2029-03-31'),
+          pincode: '500078',
+          phone: '+914027150900',
+          email: 'quality@vantagepharma.example',
+          // A manufacturing licence rather than a NABL certificate — this is a
+          // CDSCO-regulated plant, not an accredited diagnostic lab.
+          nablCertNo: 'MFG/TS/2021/000418',
+          nablValidTill: new Date('2029-12-31'),
+          // The tenant's data-encryption key, wrapped by the master key
+          // (ADR 0005). Without it every field-level encrypt/decrypt fails —
+          // device enrolment secrets and TOTP seeds both live behind it — and
+          // the failure only surfaces the first time one is needed.
           dataKeyEnc: wrapKey(tenantDek, masterKey),
         },
       });
@@ -102,54 +107,53 @@ async function main() {
 
       await tx.tenantPolicy.createMany({
         data: [
-          // Four-eyes: the authoriser may not be the person who entered the
-          // result. Small labs can turn this off, but doing so is itself audited.
+          { tenantId: TENANT_ID, key: 'tenant.vertical', value: 'PHARMA_MANUFACTURING' },
+          // Four-eyes: the analyst who generated a result may not approve it.
           { tenantId: TENANT_ID, key: 'result.fourEyesRequired', value: true },
-          // QC gating: a failed or overdue QC blocks authorisation on that
-          // analyzer+analyte (COMPLIANCE.md §6).
           { tenantId: TENANT_ID, key: 'qc.blockAuthorizationOnFailure', value: true },
           { tenantId: TENANT_ID, key: 'result.deltaCheckPercent', value: 30 },
-          { tenantId: TENANT_ID, key: 'report.autoReleaseEnabled', value: false },
-          { tenantId: TENANT_ID, key: 'retention.clinicalRecordYears', value: 5 },
+          // A batch may not be dispositioned until every test on it is approved.
+          { tenantId: TENANT_ID, key: 'batch.requireAllTestsApproved', value: true },
+          // Schedule M / Part 11: retention of manufacturing records.
+          { tenantId: TENANT_ID, key: 'retention.batchRecordYears', value: 6 },
           { tenantId: TENANT_ID, key: 'mfa.requiredForPrivilegedRoles', value: true },
         ],
       });
 
-      // -----------------------------------------------------------------------
-      // Labs (branches)
-      // -----------------------------------------------------------------------
-      const mainLab = await tx.lab.create({
+      // ------------------------------------------------------------ plant sites
+      const unit1 = await tx.lab.create({
         data: {
           tenantId: TENANT_ID,
-          code: 'HYD',
-          name: 'Sunrise Diagnostics — Jubilee Hills (Main)',
-          addressLine1: 'Plot 42, Jubilee Hills',
+          code: 'U1',
+          name: 'Unit I — Oral Solid Dosage (Shamirpet)',
+          addressLine1: 'Plot 27, Genome Valley, Shamirpet',
           city: 'Hyderabad',
           state: 'Telangana',
-          pincode: '500033',
-          phone: '+914023551234',
+          pincode: '500078',
+          phone: '+914027150900',
         },
       });
 
-      const branchLab = await tx.lab.create({
+      const unit2 = await tx.lab.create({
         data: {
           tenantId: TENANT_ID,
-          code: 'KUK',
-          name: 'Sunrise Diagnostics — Kukatpally',
-          addressLine1: 'Road No 5, KPHB Colony',
+          code: 'U2',
+          name: 'Unit II — API (Jeedimetla)',
+          addressLine1: 'Survey 118, IDA Jeedimetla',
           city: 'Hyderabad',
           state: 'Telangana',
-          pincode: '500072',
-          phone: '+914023551235',
+          pincode: '500055',
+          phone: '+914027150950',
         },
       });
-      console.log(`    labs         ${mainLab.code}, ${branchLab.code}`);
+      console.log(`    sites        ${unit1.code}, ${unit2.code}`);
 
-      // -----------------------------------------------------------------------
-      // Roles
-      // -----------------------------------------------------------------------
+      // ----------------------------------------------------------------- roles
       const roles: Record<string, string> = {};
-      for (const [code, def] of Object.entries(DEFAULT_ROLES)) {
+      // Only the roles a manufacturing site actually staffs. Seeding the full
+      // template set would put "Phlebotomist" in this tenant's user form.
+      for (const code of PHARMA_ROLE_CODES) {
+        const def = DEFAULT_ROLES[code];
         const role = await tx.role.create({
           data: {
             tenantId: TENANT_ID,
@@ -164,9 +168,7 @@ async function main() {
       }
       console.log(`    roles        ${Object.keys(roles).length} seeded`);
 
-      // -----------------------------------------------------------------------
-      // Users
-      // -----------------------------------------------------------------------
+      // ----------------------------------------------------------------- users
       const passwordHash = await hashPassword(DEMO_PASSWORD);
 
       const mkUser = async (
@@ -176,13 +178,7 @@ async function main() {
         extra: Record<string, unknown> = {},
       ) => {
         const user = await tx.user.create({
-          data: {
-            tenantId: TENANT_ID,
-            email,
-            passwordHash,
-            fullName,
-            ...extra,
-          },
+          data: { tenantId: TENANT_ID, email, passwordHash, fullName, ...extra },
         });
         await tx.userRole.create({
           data: { tenantId: TENANT_ID, userId: user.id, roleId: roles[roleCode]! },
@@ -190,271 +186,134 @@ async function main() {
         return user;
       };
 
-      const admin = await mkUser('admin@sunrise.test', 'Anita Rao', 'LAB_ADMIN');
-      const pathologist = await mkUser(
-        'pathologist@sunrise.test',
-        'Dr. Suresh Menon',
-        'PATHOLOGIST',
-        { qualification: 'MD (Pathology)', registrationNo: 'TSMC/12345/2011' },
-      );
-      const pathologist2 = await mkUser(
-        'consultant@sunrise.test',
-        'Dr. Kavita Reddy',
-        'PATHOLOGIST',
-        { qualification: 'MD (Biochemistry)', registrationNo: 'TSMC/23456/2014' },
-      );
-      const technician = await mkUser(
-        'tech@sunrise.test',
-        'Ravi Teja',
-        'LAB_TECHNICIAN',
-        { qualification: 'DMLT' },
-      );
-      const reception = await mkUser('front@sunrise.test', 'Priya Sharma', 'RECEPTIONIST');
-      const phlebotomist = await mkUser(
-        'phlebo@sunrise.test',
-        'Sunil Kumar',
-        'PHLEBOTOMIST',
-        { qualification: 'DMLT (Phlebotomy)' },
-      );
-      const auditor = await mkUser('auditor@sunrise.test', 'M. Krishnan', 'AUDITOR');
+      const admin = await mkUser('admin@vantage.test', 'Anita Rao', 'LAB_ADMIN', {
+        qualification: 'M.Pharm · Head of Quality',
+      });
+      const qa = await mkUser('qa@vantage.test', 'Dr. Suresh Menon', 'QA', {
+        qualification: 'M.Pharm, PhD · QA Manager',
+        registrationNo: 'TSPC/QA/4471',
+      });
+      const qa2 = await mkUser('qa2@vantage.test', 'Kavita Reddy', 'QA', {
+        qualification: 'M.Pharm · Deputy Manager QA',
+        registrationNo: 'TSPC/QA/5518',
+      });
+      const analyst = await mkUser('qc@vantage.test', 'Ravi Teja', 'QC_ANALYST', {
+        qualification: 'M.Sc Analytical Chemistry',
+      });
+      const analyst2 = await mkUser('qc2@vantage.test', 'Priya Sharma', 'QC_ANALYST', {
+        qualification: 'M.Sc Chemistry',
+      });
+      const stores = await mkUser('stores@vantage.test', 'Sunil Kumar', 'STORES', {
+        qualification: 'B.Sc · Stores Officer',
+      });
+      const auditor = await mkUser('auditor@vantage.test', 'M. Krishnan', 'AUDITOR', {
+        qualification: 'Corporate Quality Audit',
+      });
       console.log(`    users        7 (password: ${DEMO_PASSWORD})`);
-      void phlebotomist;
-      void auditor;
 
-      // -----------------------------------------------------------------------
-      // Reference data
-      // -----------------------------------------------------------------------
+      // -------------------------------------------------------- reference data
       const specimens = await createMany(tx.specimenType, TENANT_ID, [
-        { code: 'SER', name: 'Serum' },
-        { code: 'EDTA', name: 'Whole Blood (EDTA)' },
-        { code: 'FLU', name: 'Plasma (Sodium Fluoride)' },
-        { code: 'CIT', name: 'Plasma (Citrate)' },
-        { code: 'URN', name: 'Urine' },
-        { code: 'STL', name: 'Stool' },
+        { code: 'POWD', name: 'Powder' },
+        { code: 'TAB', name: 'Tablet' },
+        { code: 'GRAN', name: 'Granules' },
+        { code: 'LIQ', name: 'Liquid' },
+        { code: 'FOIL', name: 'Packaging Foil' },
       ]);
 
       const containers = await createMany(tx.containerType, TENANT_ID, [
-        { code: 'RED', name: 'Plain / Clot Activator', colour: 'Red', additive: 'None' },
-        { code: 'LAV', name: 'EDTA Tube', colour: 'Lavender', additive: 'K2EDTA' },
-        { code: 'GREY', name: 'Fluoride Tube', colour: 'Grey', additive: 'NaF/K-Ox' },
-        { code: 'BLUE', name: 'Citrate Tube', colour: 'Blue', additive: 'Na-Citrate 3.2%' },
-        { code: 'YEL', name: 'SST Gel Tube', colour: 'Yellow', additive: 'Gel + Clot Activator' },
-        { code: 'UCON', name: 'Urine Container', colour: 'White', additive: 'None' },
+        { code: 'AMB', name: 'Amber Glass Bottle', colour: 'Amber' },
+        { code: 'POLY', name: 'LDPE Poly Bag (double-lined)', colour: 'Clear' },
+        { code: 'HDPE', name: 'HDPE Container', colour: 'White' },
+        { code: 'ALFO', name: 'Aluminium Foil Pouch', colour: 'Silver' },
       ]);
 
-      // Controlled list — rejection rate by reason is an NABL quality indicator
-      // and must be aggregatable, so this can never be free text.
+      // Rejection reasons for a manufacturing sample, not a clinical specimen.
       await createMany(tx.rejectionReason, TENANT_ID, [
-        { code: 'HAEM', name: 'Haemolysed sample', category: 'PRE_ANALYTICAL' },
-        { code: 'QNS', name: 'Quantity not sufficient', category: 'PRE_ANALYTICAL' },
-        { code: 'CLOT', name: 'Clotted sample', category: 'PRE_ANALYTICAL' },
-        { code: 'WRCON', name: 'Wrong container / additive', category: 'PRE_ANALYTICAL' },
-        { code: 'UNLBL', name: 'Unlabelled or mislabelled', category: 'IDENTIFICATION' },
-        { code: 'LEAK', name: 'Leaked in transit', category: 'TRANSPORT' },
-        { code: 'DELAY', name: 'Delayed beyond stability', category: 'TRANSPORT' },
-        { code: 'LIPE', name: 'Lipaemic sample', category: 'PRE_ANALYTICAL' },
+        { code: 'INSUF', name: 'Insufficient quantity drawn', category: 'SAMPLING' },
+        { code: 'CONTAM', name: 'Sample contaminated during handling', category: 'SAMPLING' },
+        { code: 'MISLBL', name: 'Sample container mislabelled', category: 'IDENTIFICATION' },
+        { code: 'SEAL', name: 'Container seal compromised', category: 'INTEGRITY' },
+        { code: 'TEMP', name: 'Storage temperature excursion', category: 'INTEGRITY' },
+        { code: 'WRSAMP', name: 'Wrong batch sampled', category: 'IDENTIFICATION' },
       ]);
 
       const methods = await createMany(tx.method, TENANT_ID, [
-        { code: 'PHOTO', name: 'Photometry', principle: 'Spectrophotometric absorbance' },
-        { code: 'IMPD', name: 'Electrical Impedance', principle: 'Coulter principle' },
-        { code: 'CLIA', name: 'Chemiluminescent Immunoassay', principle: 'CLIA' },
-        { code: 'ISE', name: 'Ion Selective Electrode', principle: 'Potentiometry' },
-        { code: 'HPLC', name: 'HPLC', principle: 'Cation-exchange chromatography' },
-        { code: 'MICRO', name: 'Microscopy', principle: 'Light microscopy' },
+        { code: 'HPLC', name: 'HPLC', principle: 'Reverse-phase chromatography', sopRef: 'SOP/QC/012' },
+        { code: 'UV', name: 'UV-Vis Spectrophotometry', principle: 'Absorbance', sopRef: 'SOP/QC/008' },
+        { code: 'IR', name: 'FTIR Spectroscopy', principle: 'Infrared absorption', sopRef: 'SOP/QC/009' },
+        { code: 'KF', name: 'Karl Fischer Titration', principle: 'Coulometric', sopRef: 'SOP/QC/015' },
+        { code: 'GRAV', name: 'Gravimetry', principle: 'Loss on drying', sopRef: 'SOP/QC/004' },
+        { code: 'VIS', name: 'Visual Inspection', principle: 'Organoleptic', sopRef: 'SOP/QC/001' },
+        { code: 'DISS', name: 'Dissolution (USP Apparatus II)', principle: 'Paddle', sopRef: 'SOP/QC/021' },
+        { code: 'MLT', name: 'Microbial Limit Test', principle: 'Plate count', sopRef: 'SOP/MB/003' },
       ]);
       console.log(
-        `    reference    ${specimens.size} specimens, ${containers.size} containers, ${methods.size} methods`,
+        `    reference    ${specimens.size} specimen types, ${containers.size} containers, ${methods.size} methods`,
       );
 
-      // -----------------------------------------------------------------------
-      // Analytes
-      // -----------------------------------------------------------------------
+      // -------------------------------------------------------------- analytes
       const analytes = await createMany(tx.analyte, TENANT_ID, [
-        // Haematology
-        { code: 'HB', name: 'Haemoglobin', defaultUnit: 'g/dL', precision: 1, loincCode: '718-7' },
-        { code: 'RBC', name: 'RBC Count', defaultUnit: 'mil/µL', precision: 2, loincCode: '789-8' },
-        { code: 'WBC', name: 'Total WBC Count', defaultUnit: '/µL', precision: 0, loincCode: '6690-2' },
-        { code: 'PLT', name: 'Platelet Count', defaultUnit: '/µL', precision: 0, loincCode: '777-3' },
-        { code: 'HCT', name: 'Haematocrit (PCV)', defaultUnit: '%', precision: 1, loincCode: '4544-3' },
-        { code: 'MCV', name: 'MCV', defaultUnit: 'fL', precision: 1, loincCode: '787-2' },
-        { code: 'MCH', name: 'MCH', defaultUnit: 'pg', precision: 1, loincCode: '785-6' },
-        { code: 'MCHC', name: 'MCHC', defaultUnit: 'g/dL', precision: 1, loincCode: '786-4' },
-        { code: 'NEUT', name: 'Neutrophils', defaultUnit: '%', precision: 0, loincCode: '770-8' },
-        { code: 'LYMP', name: 'Lymphocytes', defaultUnit: '%', precision: 0, loincCode: '736-9' },
-        { code: 'EOSI', name: 'Eosinophils', defaultUnit: '%', precision: 0, loincCode: '713-8' },
-        { code: 'MONO', name: 'Monocytes', defaultUnit: '%', precision: 0, loincCode: '5905-5' },
-
-        // Biochemistry
-        { code: 'GLUF', name: 'Glucose, Fasting', defaultUnit: 'mg/dL', precision: 0, loincCode: '1558-6' },
-        { code: 'GLUPP', name: 'Glucose, Post Prandial', defaultUnit: 'mg/dL', precision: 0 },
-        { code: 'UREA', name: 'Blood Urea', defaultUnit: 'mg/dL', precision: 0, loincCode: '3094-0' },
-        { code: 'CREA', name: 'Serum Creatinine', defaultUnit: 'mg/dL', precision: 2, loincCode: '2160-0' },
-        { code: 'UA', name: 'Uric Acid', defaultUnit: 'mg/dL', precision: 1, loincCode: '3084-1' },
-        { code: 'NA', name: 'Sodium', defaultUnit: 'mmol/L', precision: 0, loincCode: '2951-2' },
-        { code: 'K', name: 'Potassium', defaultUnit: 'mmol/L', precision: 1, loincCode: '2823-3' },
-        { code: 'CL', name: 'Chloride', defaultUnit: 'mmol/L', precision: 0, loincCode: '2075-0' },
-
-        // Lipids — LDL is calculated, not measured
-        { code: 'CHOL', name: 'Total Cholesterol', defaultUnit: 'mg/dL', precision: 0, loincCode: '2093-3' },
-        { code: 'TRIG', name: 'Triglycerides', defaultUnit: 'mg/dL', precision: 0, loincCode: '2571-8' },
-        { code: 'HDL', name: 'HDL Cholesterol', defaultUnit: 'mg/dL', precision: 0, loincCode: '2085-9' },
-        { code: 'LDL', name: 'LDL Cholesterol (calc.)', defaultUnit: 'mg/dL', precision: 0, loincCode: '13457-7' },
-
-        // Liver
-        { code: 'TBIL', name: 'Total Bilirubin', defaultUnit: 'mg/dL', precision: 2, loincCode: '1975-2' },
-        { code: 'DBIL', name: 'Direct Bilirubin', defaultUnit: 'mg/dL', precision: 2, loincCode: '1968-7' },
-        { code: 'SGPT', name: 'SGPT / ALT', defaultUnit: 'U/L', precision: 0, loincCode: '1742-6' },
-        { code: 'SGOT', name: 'SGOT / AST', defaultUnit: 'U/L', precision: 0, loincCode: '1920-8' },
-        { code: 'ALP', name: 'Alkaline Phosphatase', defaultUnit: 'U/L', precision: 0, loincCode: '6768-6' },
-        { code: 'TPROT', name: 'Total Protein', defaultUnit: 'g/dL', precision: 1, loincCode: '2885-2' },
-        { code: 'ALB', name: 'Albumin', defaultUnit: 'g/dL', precision: 1, loincCode: '1751-7' },
-
-        // Endocrine
-        { code: 'TSH', name: 'TSH', defaultUnit: 'µIU/mL', precision: 3, loincCode: '3016-3' },
-        { code: 'T3', name: 'Total T3', defaultUnit: 'ng/dL', precision: 1, loincCode: '3053-6' },
-        { code: 'T4', name: 'Total T4', defaultUnit: 'µg/dL', precision: 2, loincCode: '3026-2' },
-        { code: 'HBA1C', name: 'HbA1c', defaultUnit: '%', precision: 1, loincCode: '4548-4' },
-
-        // Qualitative / text
         {
-          code: 'URCOL',
-          name: 'Urine Colour',
+          code: 'DESC',
+          name: 'Description',
           valueType: 'QUALITATIVE' as const,
-          allowedValues: ['Pale Yellow', 'Yellow', 'Dark Yellow', 'Amber', 'Red', 'Colourless'],
+          // "Complies" is a legitimate entry against a textual criterion — an
+          // analyst records conformance to the written description rather than
+          // re-typing it. Omitting it makes the field reject the normal answer.
+          allowedValues: [
+            'Complies',
+            'White to off-white crystalline powder',
+            'White crystalline powder',
+            'White capsule-shaped uncoated tablets',
+            'White to off-white powder',
+            'Off-white powder',
+            'Does not comply',
+          ],
         },
         {
-          code: 'URPRO',
-          name: 'Urine Protein',
+          code: 'IDEN',
+          name: 'Identification (IR)',
           valueType: 'QUALITATIVE' as const,
-          allowedValues: ['Absent', 'Trace', '1+', '2+', '3+', '4+'],
+          allowedValues: ['Complies', 'Does not comply'],
         },
+        { code: 'ASSAY', name: 'Assay (on dried basis)', defaultUnit: '%', precision: 2 },
+        { code: 'LOD', name: 'Loss on Drying', defaultUnit: '%', precision: 2 },
+        { code: 'WATER', name: 'Water Content (KF)', defaultUnit: '%', precision: 2 },
+        { code: 'SASH', name: 'Sulphated Ash', defaultUnit: '%', precision: 2 },
+        { code: 'HMET', name: 'Heavy Metals', defaultUnit: 'ppm', precision: 1, valueType: 'NUMERIC_BOUNDED' as const },
+        { code: 'RSUB', name: 'Related Substances (total)', defaultUnit: '%', precision: 3 },
+        { code: 'RSING', name: 'Single Max Impurity', defaultUnit: '%', precision: 3 },
+        { code: 'RESSOL', name: 'Residual Solvents', defaultUnit: 'ppm', precision: 0, valueType: 'NUMERIC_BOUNDED' as const },
+        { code: 'PH', name: 'pH (5% solution)', defaultUnit: '', precision: 2 },
+        { code: 'BDEN', name: 'Bulk Density', defaultUnit: 'g/mL', precision: 3 },
+        { code: 'PSIZE', name: 'Particle Size (D90)', defaultUnit: 'µm', precision: 1 },
+        { code: 'DISS', name: 'Dissolution (30 min)', defaultUnit: '%', precision: 1 },
+        { code: 'UWT', name: 'Uniformity of Weight', defaultUnit: '%', precision: 2 },
+        { code: 'DISINT', name: 'Disintegration Time', defaultUnit: 'min', precision: 1 },
+        { code: 'HARD', name: 'Hardness', defaultUnit: 'N', precision: 0 },
+        { code: 'FRIA', name: 'Friability', defaultUnit: '%', precision: 2 },
+        { code: 'TAMC', name: 'Total Aerobic Microbial Count', defaultUnit: 'cfu/g', precision: 0 },
+        { code: 'TYMC', name: 'Total Yeast & Mould Count', defaultUnit: 'cfu/g', precision: 0 },
         {
-          code: 'URGLU',
-          name: 'Urine Glucose',
+          code: 'ECOLI',
+          name: 'E. coli',
           valueType: 'QUALITATIVE' as const,
-          allowedValues: ['Absent', 'Trace', '1+', '2+', '3+', '4+'],
+          allowedValues: ['Absent', 'Present'],
         },
-        {
-          code: 'URDEP',
-          name: 'Urine Deposits',
-          valueType: 'TEXT' as const,
-        },
-        {
-          code: 'BLDGRP',
-          name: 'ABO Blood Group',
-          valueType: 'QUALITATIVE' as const,
-          allowedValues: ['A', 'B', 'AB', 'O'],
-        },
+        { code: 'GSM', name: 'Grammage', defaultUnit: 'g/m²', precision: 1 },
+        { code: 'THICK', name: 'Thickness', defaultUnit: 'µm', precision: 1 },
       ]);
       console.log(`    analytes     ${analytes.size}`);
 
-      // -----------------------------------------------------------------------
-      // Reference ranges
-      //
-      // Superseded ranges are closed with effectiveTo rather than edited, so a
-      // historical report still renders with the range in force at the time.
-      // -----------------------------------------------------------------------
-      const rr = (
-        analyteCode: string,
-        low: number | null,
-        high: number | null,
-        opts: {
-          sex?: 'MALE' | 'FEMALE';
-          minAgeDays?: number;
-          maxAgeDays?: number;
-          criticalLow?: number;
-          criticalHigh?: number;
-          unit?: string;
-          displayText?: string;
-        } = {},
-      ) => ({
-        tenantId: TENANT_ID,
-        analyteId: analytes.get(analyteCode)!,
-        sex: opts.sex ?? null,
-        minAgeDays: opts.minAgeDays ?? null,
-        maxAgeDays: opts.maxAgeDays ?? null,
-        lowValue: low !== null ? new Prisma.Decimal(low) : null,
-        highValue: high !== null ? new Prisma.Decimal(high) : null,
-        criticalLow: opts.criticalLow !== undefined ? new Prisma.Decimal(opts.criticalLow) : null,
-        criticalHigh: opts.criticalHigh !== undefined ? new Prisma.Decimal(opts.criticalHigh) : null,
-        unit: opts.unit ?? null,
-        displayText: opts.displayText ?? null,
-      });
-
-      await tx.referenceRange.createMany({
-        data: [
-          // Sex-specific — the reason reference ranges cannot be a single number
-          rr('HB', 13.0, 17.0, { sex: 'MALE', unit: 'g/dL', criticalLow: 7.0, criticalHigh: 20.0 }),
-          rr('HB', 12.0, 15.0, { sex: 'FEMALE', unit: 'g/dL', criticalLow: 7.0, criticalHigh: 20.0 }),
-          rr('HCT', 40, 50, { sex: 'MALE', unit: '%' }),
-          rr('HCT', 36, 46, { sex: 'FEMALE', unit: '%' }),
-          rr('RBC', 4.5, 5.9, { sex: 'MALE', unit: 'mil/µL' }),
-          rr('RBC', 4.1, 5.1, { sex: 'FEMALE', unit: 'mil/µL' }),
-          rr('CREA', 0.7, 1.3, { sex: 'MALE', unit: 'mg/dL', criticalHigh: 6.0 }),
-          rr('CREA', 0.6, 1.1, { sex: 'FEMALE', unit: 'mg/dL', criticalHigh: 6.0 }),
-          rr('UA', 3.5, 7.2, { sex: 'MALE', unit: 'mg/dL' }),
-          rr('UA', 2.6, 6.0, { sex: 'FEMALE', unit: 'mg/dL' }),
-
-          // Sex-independent
-          rr('WBC', 4000, 11000, { unit: '/µL', criticalLow: 1500, criticalHigh: 30000 }),
-          rr('PLT', 150000, 450000, { unit: '/µL', criticalLow: 30000, criticalHigh: 1000000 }),
-          rr('MCV', 80, 100, { unit: 'fL' }),
-          rr('MCH', 27, 33, { unit: 'pg' }),
-          rr('MCHC', 32, 36, { unit: 'g/dL' }),
-          rr('NEUT', 40, 75, { unit: '%' }),
-          rr('LYMP', 20, 45, { unit: '%' }),
-          rr('EOSI', 1, 6, { unit: '%' }),
-          rr('MONO', 2, 10, { unit: '%' }),
-
-          rr('GLUF', 70, 100, { unit: 'mg/dL', criticalLow: 45, criticalHigh: 400 }),
-          rr('GLUPP', 70, 140, { unit: 'mg/dL', criticalLow: 45, criticalHigh: 400 }),
-          rr('UREA', 15, 40, { unit: 'mg/dL' }),
-          rr('NA', 136, 145, { unit: 'mmol/L', criticalLow: 120, criticalHigh: 160 }),
-          rr('K', 3.5, 5.1, { unit: 'mmol/L', criticalLow: 2.5, criticalHigh: 6.5 }),
-          rr('CL', 98, 107, { unit: 'mmol/L' }),
-
-          rr('CHOL', null, 200, { unit: 'mg/dL', displayText: 'Desirable: < 200' }),
-          rr('TRIG', null, 150, { unit: 'mg/dL', displayText: 'Normal: < 150' }),
-          rr('HDL', 40, null, { unit: 'mg/dL', displayText: 'Desirable: > 40' }),
-          rr('LDL', null, 100, { unit: 'mg/dL', displayText: 'Optimal: < 100' }),
-
-          rr('TBIL', 0.2, 1.2, { unit: 'mg/dL', criticalHigh: 15 }),
-          rr('DBIL', 0.0, 0.3, { unit: 'mg/dL' }),
-          rr('SGPT', 0, 45, { unit: 'U/L' }),
-          rr('SGOT', 0, 40, { unit: 'U/L' }),
-          rr('ALP', 40, 130, { unit: 'U/L' }),
-          rr('TPROT', 6.4, 8.3, { unit: 'g/dL' }),
-          rr('ALB', 3.5, 5.2, { unit: 'g/dL' }),
-
-          rr('TSH', 0.4, 4.0, { unit: 'µIU/mL' }),
-          rr('T3', 80, 200, { unit: 'ng/dL' }),
-          rr('T4', 4.5, 12.0, { unit: 'µg/dL' }),
-          rr('HBA1C', null, 5.7, {
-            unit: '%',
-            displayText: 'Normal < 5.7 | Prediabetes 5.7-6.4 | Diabetes ≥ 6.5',
-          }),
-        ],
-      });
-
-      // -----------------------------------------------------------------------
-      // Tests
-      // -----------------------------------------------------------------------
+      // ----------------------------------------------------------------- tests
       const tests = new Map<string, string>();
 
       const mkTest = async (
         code: string,
         name: string,
         department: string,
-        analyteCodes: { code: string; formula?: string }[],
-        opts: {
-          specimen: string;
-          container: string;
-          method?: string;
-          price: number;
-          tatMinutes: number;
-          instructions?: string;
-        },
+        analyteCodes: string[],
+        opts: { method: string; specimen: string; container: string; tatMinutes: number; sop?: string },
       ) => {
         const t = await tx.testDefinition.create({
           data: {
@@ -462,161 +321,131 @@ async function main() {
             code,
             name,
             department: department as never,
-            methodId: opts.method ? methods.get(opts.method)! : null,
+            methodId: methods.get(opts.method)!,
             specimenTypeId: specimens.get(opts.specimen)!,
             containerTypeId: containers.get(opts.container)!,
-            price: new Prisma.Decimal(opts.price),
+            price: d(0), // internal QC: no price, this is not a service lab
             tatMinutes: opts.tatMinutes,
-            sacCode: '999316', // human health services
-            instructions: opts.instructions,
+            instructions: opts.sop ? `Per ${opts.sop}` : null,
           },
         });
         tests.set(code, t.id);
         await tx.testAnalyte.createMany({
-          data: analyteCodes.map((a, i) => ({
+          data: analyteCodes.map((c, i) => ({
             tenantId: TENANT_ID,
             testDefinitionId: t.id,
-            analyteId: analytes.get(a.code)!,
+            analyteId: analytes.get(c)!,
             sortOrder: i,
-            formula: a.formula ?? null,
           })),
         });
         return t;
       };
 
-      await mkTest(
-        'CBC',
-        'Complete Blood Count (CBC)',
-        'HAEMATOLOGY',
-        ['HB', 'RBC', 'WBC', 'PLT', 'HCT', 'MCV', 'MCH', 'MCHC', 'NEUT', 'LYMP', 'EOSI', 'MONO'].map(
-          (code) => ({ code }),
-        ),
-        { specimen: 'EDTA', container: 'LAV', method: 'IMPD', price: 350, tatMinutes: 120 },
-      );
-
-      await mkTest(
-        'LIPID',
-        'Lipid Profile',
-        'BIOCHEMISTRY',
-        [
-          { code: 'CHOL' },
-          { code: 'TRIG' },
-          { code: 'HDL' },
-          // Friedewald: LDL = Total Cholesterol - HDL - (Triglycerides / 5)
-          { code: 'LDL', formula: 'CHOL - HDL - (TRIG / 5)' },
-        ],
-        {
-          specimen: 'SER',
-          container: 'YEL',
-          method: 'PHOTO',
-          price: 800,
-          tatMinutes: 240,
-          instructions: '12 hours fasting required. Water is permitted.',
-        },
-      );
-
-      await mkTest(
-        'LFT',
-        'Liver Function Test',
-        'BIOCHEMISTRY',
-        ['TBIL', 'DBIL', 'SGPT', 'SGOT', 'ALP', 'TPROT', 'ALB'].map((code) => ({ code })),
-        { specimen: 'SER', container: 'YEL', method: 'PHOTO', price: 900, tatMinutes: 240 },
-      );
-
-      await mkTest(
-        'KFT',
-        'Kidney Function Test',
-        'BIOCHEMISTRY',
-        ['UREA', 'CREA', 'UA', 'NA', 'K', 'CL'].map((code) => ({ code })),
-        { specimen: 'SER', container: 'YEL', method: 'PHOTO', price: 850, tatMinutes: 240 },
-      );
-
-      await mkTest('GLUF', 'Glucose — Fasting', 'BIOCHEMISTRY', [{ code: 'GLUF' }], {
-        specimen: 'FLU',
-        container: 'GREY',
-        method: 'PHOTO',
-        price: 120,
-        tatMinutes: 90,
-        instructions: '8-12 hours overnight fasting.',
+      await mkTest('TDESC', 'Description', 'CHEMICAL', ['DESC'], {
+        method: 'VIS',
+        specimen: 'POWD',
+        container: 'POLY',
+        tatMinutes: 30,
+        sop: 'SOP/QC/001',
       });
-
-      await mkTest('HBA1C', 'HbA1c (Glycated Haemoglobin)', 'BIOCHEMISTRY', [{ code: 'HBA1C' }], {
-        specimen: 'EDTA',
-        container: 'LAV',
+      await mkTest('TIDEN', 'Identification by IR', 'INSTRUMENTATION', ['IDEN'], {
+        method: 'IR',
+        specimen: 'POWD',
+        container: 'POLY',
+        tatMinutes: 120,
+        sop: 'SOP/QC/009',
+      });
+      await mkTest('TASSAY', 'Assay by HPLC', 'INSTRUMENTATION', ['ASSAY'], {
         method: 'HPLC',
-        price: 600,
-        tatMinutes: 360,
+        specimen: 'POWD',
+        container: 'AMB',
+        tatMinutes: 480,
+        sop: 'SOP/QC/012',
       });
-
+      await mkTest('TLOD', 'Loss on Drying', 'CHEMICAL', ['LOD'], {
+        method: 'GRAV',
+        specimen: 'POWD',
+        container: 'POLY',
+        tatMinutes: 240,
+        sop: 'SOP/QC/004',
+      });
+      await mkTest('TWATER', 'Water Content by KF', 'INSTRUMENTATION', ['WATER'], {
+        method: 'KF',
+        specimen: 'POWD',
+        container: 'AMB',
+        tatMinutes: 120,
+        sop: 'SOP/QC/015',
+      });
+      await mkTest('TSASH', 'Sulphated Ash', 'CHEMICAL', ['SASH'], {
+        method: 'GRAV',
+        specimen: 'POWD',
+        container: 'POLY',
+        tatMinutes: 360,
+        sop: 'SOP/QC/006',
+      });
+      await mkTest('TRSUB', 'Related Substances by HPLC', 'INSTRUMENTATION', ['RSUB', 'RSING'], {
+        method: 'HPLC',
+        specimen: 'POWD',
+        container: 'AMB',
+        tatMinutes: 600,
+        sop: 'SOP/QC/013',
+      });
+      await mkTest('THMET', 'Heavy Metals', 'CHEMICAL', ['HMET'], {
+        method: 'UV',
+        specimen: 'POWD',
+        container: 'AMB',
+        tatMinutes: 300,
+        sop: 'SOP/QC/018',
+      });
+      await mkTest('TPHYS', 'Physical Parameters', 'CHEMICAL', ['PH', 'BDEN', 'PSIZE'], {
+        method: 'UV',
+        specimen: 'POWD',
+        container: 'POLY',
+        tatMinutes: 180,
+        sop: 'SOP/QC/003',
+      });
+      await mkTest('TDISS', 'Dissolution', 'INSTRUMENTATION', ['DISS'], {
+        method: 'DISS',
+        specimen: 'TAB',
+        container: 'HDPE',
+        tatMinutes: 300,
+        sop: 'SOP/QC/021',
+      });
       await mkTest(
-        'THYRO',
-        'Thyroid Profile (T3, T4, TSH)',
-        'IMMUNOLOGY',
-        ['T3', 'T4', 'TSH'].map((code) => ({ code })),
-        { specimen: 'SER', container: 'YEL', method: 'CLIA', price: 700, tatMinutes: 480 },
+        'TTAB',
+        'Tablet Physical Tests',
+        'CHEMICAL',
+        ['UWT', 'DISINT', 'HARD', 'FRIA'],
+        { method: 'VIS', specimen: 'TAB', container: 'HDPE', tatMinutes: 240, sop: 'SOP/QC/022' },
       );
-
-      await mkTest(
-        'URINE',
-        'Urine Routine Examination',
-        'CLINICAL_PATHOLOGY',
-        ['URCOL', 'URPRO', 'URGLU', 'URDEP'].map((code) => ({ code })),
-        {
-          specimen: 'URN',
-          container: 'UCON',
-          method: 'MICRO',
-          price: 200,
-          tatMinutes: 120,
-          instructions: 'Midstream clean-catch sample preferred.',
-        },
-      );
+      await mkTest('TMLT', 'Microbial Limit Test', 'MICROBIOLOGY', ['TAMC', 'TYMC', 'ECOLI'], {
+        method: 'MLT',
+        specimen: 'POWD',
+        container: 'POLY',
+        tatMinutes: 7200, // 5 days incubation
+        sop: 'SOP/MB/003',
+      });
+      await mkTest('TPACK', 'Packaging Material Tests', 'PACKAGING_DEVELOPMENT', ['GSM', 'THICK'], {
+        method: 'VIS',
+        specimen: 'FOIL',
+        container: 'ALFO',
+        tatMinutes: 180,
+        sop: 'SOP/QC/031',
+      });
       console.log(`    tests        ${tests.size}`);
 
-      // -----------------------------------------------------------------------
-      // Panels
-      // -----------------------------------------------------------------------
-      const mkPanel = async (code: string, name: string, price: number, testCodes: string[]) => {
-        const p = await tx.panel.create({
-          data: { tenantId: TENANT_ID, code, name, price: new Prisma.Decimal(price), sacCode: '999316' },
-        });
-        await tx.panelItem.createMany({
-          data: testCodes.map((tc, i) => ({
-            tenantId: TENANT_ID,
-            panelId: p.id,
-            testDefinitionId: tests.get(tc)!,
-            sortOrder: i,
-          })),
-        });
-        return p;
-      };
-
-      // Bundled below the sum of parts — how these are actually sold.
-      await mkPanel('MHC-BASIC', 'Master Health Checkup — Basic', 1999, [
-        'CBC',
-        'GLUF',
-        'LIPID',
-        'LFT',
-        'KFT',
-        'URINE',
-      ]);
-      await mkPanel('DIAB', 'Diabetes Screening Package', 899, ['GLUF', 'HBA1C']);
-      await mkPanel('THY-FULL', 'Thyroid + CBC Package', 950, ['THYRO', 'CBC']);
-      console.log(`    panels       3`);
-
-      // -----------------------------------------------------------------------
-      // Competency  —  ISO 15189: only authorised personnel may perform/verify.
-      // Enforced at authorisation time, not merely recorded.
-      // -----------------------------------------------------------------------
-      const competencyRows: Prisma.UserCompetencyCreateManyInput[] = [];
+      // ------------------------------------------------------------ competency
+      const competency: Prisma.UserCompetencyCreateManyInput[] = [];
       for (const testId of tests.values()) {
         for (const [userId, level] of [
-          [technician.id, 'PERFORM'],
-          [technician.id, 'VERIFY'],
-          [pathologist.id, 'AUTHORIZE'],
-          [pathologist.id, 'VERIFY'],
-          [pathologist2.id, 'AUTHORIZE'],
+          [analyst.id, 'PERFORM'],
+          [analyst.id, 'VERIFY'],
+          [analyst2.id, 'PERFORM'],
+          [qa.id, 'AUTHORIZE'],
+          [qa.id, 'VERIFY'],
+          [qa2.id, 'AUTHORIZE'],
         ] as const) {
-          competencyRows.push({
+          competency.push({
             tenantId: TENANT_ID,
             userId,
             testDefinitionId: testId,
@@ -624,555 +453,1177 @@ async function main() {
             validFrom: new Date('2026-01-01'),
             validUntil: new Date('2027-12-31'),
             grantedBy: admin.id,
-            evidenceNote: 'Initial competency assessment on induction',
+            evidenceNote: 'Analyst qualification per SOP/HR/007',
           });
         }
       }
-      await tx.userCompetency.createMany({ data: competencyRows });
-      console.log(`    competency   ${competencyRows.length} records`);
+      await tx.userCompetency.createMany({ data: competency });
+      console.log(`    competency   ${competency.length} records`);
 
-      // -----------------------------------------------------------------------
-      // Referring doctors
-      // -----------------------------------------------------------------------
-      const org = await tx.referringOrganization.create({
-        data: {
-          tenantId: TENANT_ID,
-          code: 'APOLLO-JH',
-          name: 'Apollo Clinic, Jubilee Hills',
-          type: 'clinic',
-          city: 'Hyderabad',
-          state: 'Telangana',
-          stateCode: '36',
-        },
+      // ------------------------------------------------------------- materials
+      const materials = new Map<string, string>();
+      const mkMaterial = async (data: {
+        code: string;
+        name: string;
+        type: string;
+        unit: string;
+        manufacturer?: string;
+        pharmacopoeia?: string;
+        storageCondition?: string;
+        retestPeriodDays?: number;
+        handlingNotes?: string;
+      }) => {
+        const m = await tx.material.create({
+          data: { tenantId: TENANT_ID, ...data, type: data.type as never },
+        });
+        materials.set(m.code, m.id);
+        return m;
+      };
+
+      await mkMaterial({
+        code: 'API-PCM',
+        name: 'Paracetamol IP',
+        type: 'API',
+        unit: 'kg',
+        manufacturer: 'Sri Krishna Pharmaceuticals',
+        pharmacopoeia: 'IP 2022',
+        storageCondition: 'Below 30 °C, protected from light and moisture',
+        retestPeriodDays: 1095,
       });
+      await mkMaterial({
+        code: 'API-MET',
+        name: 'Metformin Hydrochloride IP',
+        type: 'API',
+        unit: 'kg',
+        manufacturer: 'Harman Finochem',
+        pharmacopoeia: 'IP 2022',
+        storageCondition: 'Below 30 °C, in tightly closed containers',
+        retestPeriodDays: 1095,
+      });
+      await mkMaterial({
+        code: 'RM-MCC',
+        name: 'Microcrystalline Cellulose PH-102',
+        type: 'RAW_MATERIAL',
+        unit: 'kg',
+        manufacturer: 'Signet Chemical',
+        pharmacopoeia: 'IP/BP/USP-NF',
+        storageCondition: 'Below 30 °C, dry',
+        retestPeriodDays: 730,
+      });
+      await mkMaterial({
+        code: 'RM-MGST',
+        name: 'Magnesium Stearate IP',
+        type: 'RAW_MATERIAL',
+        unit: 'kg',
+        manufacturer: 'Nitika Pharmaceutical',
+        pharmacopoeia: 'IP 2022',
+        storageCondition: 'Below 30 °C, dry',
+        retestPeriodDays: 730,
+        handlingNotes: 'Lubricant — over-blending reduces dissolution. Handle per SOP/PR/019.',
+      });
+      await mkMaterial({
+        code: 'RM-PVP',
+        name: 'Povidone K-30 IP',
+        type: 'RAW_MATERIAL',
+        unit: 'kg',
+        manufacturer: 'Boai NKY',
+        pharmacopoeia: 'IP 2022',
+        storageCondition: 'Below 25 °C, protected from moisture — hygroscopic',
+        retestPeriodDays: 730,
+        handlingNotes: 'Hygroscopic. Reseal immediately after dispensing.',
+      });
+      await mkMaterial({
+        code: 'PM-ALU',
+        name: 'Alu-Alu Blister Foil 45 µm',
+        type: 'PACKAGING',
+        unit: 'kg',
+        manufacturer: 'Bilcare',
+        storageCondition: 'Below 30 °C, dry, flat storage',
+      });
+      await mkMaterial({
+        code: 'FP-PCM500',
+        name: 'Paracetamol Tablets IP 500 mg',
+        type: 'FINISHED_PRODUCT',
+        unit: 'nos',
+        pharmacopoeia: 'IP 2022',
+        storageCondition: 'Store below 30 °C, protected from light and moisture',
+      });
+      console.log(`    materials    ${materials.size}`);
 
-      const doctors = await createMany(tx.referringDoctor, TENANT_ID, [
-        {
-          code: 'DR001',
-          name: 'Dr. Anand Krishnan',
-          qualification: 'MBBS, MD (Medicine)',
-          speciality: 'General Medicine',
-          organizationId: org.id,
-        },
-        {
-          code: 'DR002',
-          name: 'Dr. Meera Iyer',
-          qualification: 'MBBS, DGO',
-          speciality: 'Obstetrics & Gynaecology',
-        },
-        { code: 'SELF', name: 'Self / Walk-in', speciality: 'N/A' },
+      // -------------------------------------------------------- specifications
+      const specs = new Map<string, string>();
+
+      const mkSpec = async (
+        materialCode: string,
+        code: string,
+        basis: string,
+        limits: {
+          analyte: string;
+          test?: string;
+          min?: number;
+          max?: number;
+          text?: string;
+          unit?: string;
+          critical?: boolean;
+        }[],
+      ) => {
+        const spec = await tx.specification.create({
+          data: {
+            tenantId: TENANT_ID,
+            materialId: materials.get(materialCode)!,
+            code,
+            version: 1,
+            status: 'APPROVED',
+            basis,
+            effectiveFrom: daysAgo(200),
+            approvedBy: qa.id,
+            approvedAt: daysAgo(200),
+            createdBy: admin.id,
+          },
+        });
+        specs.set(code, spec.id);
+
+        await tx.specLimit.createMany({
+          data: limits.map((l, i) => ({
+            tenantId: TENANT_ID,
+            specificationId: spec.id,
+            analyteId: analytes.get(l.analyte)!,
+            testDefinitionId: l.test ? tests.get(l.test)! : null,
+            sortOrder: i,
+            minValue: l.min !== undefined ? d(l.min) : null,
+            maxValue: l.max !== undefined ? d(l.max) : null,
+            textCriteria: l.text ?? null,
+            unit: l.unit ?? null,
+            isCritical: l.critical ?? true,
+          })),
+        });
+        return spec;
+      };
+
+      await mkSpec('API-PCM', 'SPEC/API-PCM/01', 'IP 2022 monograph — Paracetamol', [
+        { analyte: 'DESC', test: 'TDESC', text: 'White crystalline powder' },
+        { analyte: 'IDEN', test: 'TIDEN', text: 'Complies by IR' },
+        { analyte: 'ASSAY', test: 'TASSAY', min: 98.0, max: 102.0, unit: '%' },
+        { analyte: 'LOD', test: 'TLOD', max: 0.5, unit: '%' },
+        { analyte: 'SASH', test: 'TSASH', max: 0.1, unit: '%', critical: false },
+        { analyte: 'RSUB', test: 'TRSUB', max: 0.5, unit: '%' },
+        { analyte: 'RSING', test: 'TRSUB', max: 0.1, unit: '%' },
+        { analyte: 'HMET', test: 'THMET', max: 20, unit: 'ppm' },
       ]);
 
-      // -----------------------------------------------------------------------
-      // QC materials — the gate that makes "run QC afterwards" impossible
-      // -----------------------------------------------------------------------
-      const qcMat = await tx.qcMaterial.create({
+      await mkSpec('API-MET', 'SPEC/API-MET/01', 'IP 2022 monograph — Metformin HCl', [
+        { analyte: 'DESC', test: 'TDESC', text: 'White crystalline powder' },
+        { analyte: 'IDEN', test: 'TIDEN', text: 'Complies by IR' },
+        { analyte: 'ASSAY', test: 'TASSAY', min: 98.5, max: 101.0, unit: '%' },
+        { analyte: 'WATER', test: 'TWATER', max: 0.5, unit: '%' },
+        { analyte: 'RSUB', test: 'TRSUB', max: 0.3, unit: '%' },
+      ]);
+
+      await mkSpec('RM-MCC', 'SPEC/RM-MCC/01', 'IP/USP-NF — Microcrystalline Cellulose', [
+        { analyte: 'DESC', test: 'TDESC', text: 'White to off-white powder' },
+        { analyte: 'LOD', test: 'TLOD', max: 5.0, unit: '%' },
+        { analyte: 'PH', test: 'TPHYS', min: 5.0, max: 7.5, critical: false },
+        { analyte: 'BDEN', test: 'TPHYS', min: 0.28, max: 0.38, unit: 'g/mL', critical: false },
+        { analyte: 'TAMC', test: 'TMLT', max: 1000, unit: 'cfu/g' },
+        { analyte: 'ECOLI', test: 'TMLT', text: 'Absent' },
+      ]);
+
+      await mkSpec('RM-MGST', 'SPEC/RM-MGST/01', 'IP 2022 — Magnesium Stearate', [
+        { analyte: 'DESC', test: 'TDESC', text: 'White to off-white powder' },
+        { analyte: 'ASSAY', test: 'TASSAY', min: 4.0, max: 5.0, unit: '%' },
+        { analyte: 'LOD', test: 'TLOD', max: 6.0, unit: '%' },
+      ]);
+
+      await mkSpec('PM-ALU', 'SPEC/PM-ALU/01', 'Internal standard — Alu-Alu foil', [
+        { analyte: 'GSM', test: 'TPACK', min: 118, max: 132, unit: 'g/m²' },
+        { analyte: 'THICK', test: 'TPACK', min: 42, max: 48, unit: 'µm' },
+      ]);
+
+      await mkSpec('FP-PCM500', 'SPEC/FP-PCM500/01', 'IP 2022 — Paracetamol Tablets', [
+        { analyte: 'DESC', test: 'TDESC', text: 'White capsule-shaped uncoated tablets' },
+        { analyte: 'ASSAY', test: 'TASSAY', min: 95.0, max: 105.0, unit: '%' },
+        { analyte: 'DISS', test: 'TDISS', min: 80.0, unit: '%' },
+        { analyte: 'UWT', test: 'TTAB', max: 5.0, unit: '%' },
+        { analyte: 'DISINT', test: 'TTAB', max: 15, unit: 'min' },
+        { analyte: 'HARD', test: 'TTAB', min: 40, max: 90, unit: 'N', critical: false },
+        { analyte: 'FRIA', test: 'TTAB', max: 1.0, unit: '%', critical: false },
+      ]);
+      console.log(`    specs        ${specs.size} approved specifications`);
+
+      // -------------------------------------------------------- goods receipts
+      let grnSeq = 0;
+      const mkGrn = async (supplier: string, opts: { po: string; invoice: string; ago: number; note?: string }) => {
+        grnSeq++;
+        return tx.goodsReceipt.create({
+          data: {
+            tenantId: TENANT_ID,
+            grnNumber: `GRN/26/${String(grnSeq).padStart(4, '0')}`,
+            supplierName: supplier,
+            poReference: opts.po,
+            invoiceRef: opts.invoice,
+            receivedAt: daysAgo(opts.ago),
+            receivedBy: stores.id,
+            receiptCheckNote: opts.note ?? 'Containers intact, seals verified, no damage on visual check.',
+          },
+        });
+      };
+
+      const grn1 = await mkGrn('Sri Krishna Pharmaceuticals', { po: 'PO/26/0311', invoice: 'SKP/8842', ago: 26 });
+      const grn2 = await mkGrn('Harman Finochem Ltd', { po: 'PO/26/0318', invoice: 'HF/2291', ago: 19 });
+      const grn3 = await mkGrn('Signet Chemical Corp', { po: 'PO/26/0324', invoice: 'SC/5517', ago: 12 });
+      const grn4 = await mkGrn('Nitika Pharmaceutical', { po: 'PO/26/0330', invoice: 'NP/1104', ago: 6 });
+      const grn5 = await mkGrn('Bilcare Ltd', {
+        po: 'PO/26/0333',
+        invoice: 'BC/7730',
+        ago: 3,
+        note: 'One pallet showed minor corner crush; affected reels segregated and noted.',
+      });
+
+      // -------------------------------------------------------------- batches
+      const batches = new Map<string, { id: string; number: string }>();
+
+      const mkBatch = async (
+        key: string,
+        materialCode: string,
+        grnId: string | null,
+        data: {
+          batchNumber: string;
+          manufacturerLot?: string;
+          qty: number;
+          unit: string;
+          containers: number;
+          mfgAgo: number;
+          expiryIn: number;
+          status: string;
+          location: string;
+          dispositionedAgo?: number;
+        },
+      ) => {
+        const b = await tx.materialBatch.create({
+          data: {
+            tenantId: TENANT_ID,
+            materialId: materials.get(materialCode)!,
+            goodsReceiptId: grnId,
+            batchNumber: data.batchNumber,
+            manufacturerLot: data.manufacturerLot ?? null,
+            quantityReceived: d(data.qty),
+            quantityAvailable: d(data.qty),
+            unit: data.unit,
+            containerCount: data.containers,
+            manufacturedAt: daysAgo(data.mfgAgo),
+            expiryDate: daysAhead(data.expiryIn),
+            retestDate: daysAhead(Math.min(data.expiryIn, 730)),
+            status: data.status as never,
+            location: data.location,
+            dispositionedAt: data.dispositionedAgo ? daysAgo(data.dispositionedAgo) : null,
+            dispositionedBy: data.dispositionedAgo ? qa.id : null,
+            createdBy: stores.id,
+          },
+        });
+        batches.set(key, { id: b.id, number: b.batchNumber });
+        return b;
+      };
+
+      // Approved — has a released COA.
+      await mkBatch('pcm-approved', 'API-PCM', grn1.id, {
+        batchNumber: 'PCM/26/0141',
+        manufacturerLot: 'SKP-24118',
+        qty: 500,
+        unit: 'kg',
+        containers: 20,
+        mfgAgo: 90,
+        expiryIn: 1000,
+        status: 'APPROVED',
+        location: 'Approved Store — Rack A3',
+        dispositionedAgo: 18,
+      });
+
+      // Rejected — off the back of a closed OOS.
+      await mkBatch('met-rejected', 'API-MET', grn2.id, {
+        batchNumber: 'MET/26/0087',
+        manufacturerLot: 'HF-9921',
+        qty: 250,
+        unit: 'kg',
+        containers: 10,
+        mfgAgo: 60,
+        expiryIn: 900,
+        status: 'REJECTED',
+        location: 'Rejected Store — Cage R1 (locked)',
+        dispositionedAgo: 9,
+      });
+
+      // Approved with deviation — a non-critical limit exceeded, accepted.
+      await mkBatch('mcc-deviation', 'RM-MCC', grn3.id, {
+        batchNumber: 'MCC/26/0233',
+        manufacturerLot: 'SG-4471',
+        qty: 800,
+        unit: 'kg',
+        containers: 32,
+        mfgAgo: 40,
+        expiryIn: 700,
+        status: 'APPROVED',
+        location: 'Approved Store — Rack B1',
+        dispositionedAgo: 5,
+      });
+
+      // Under test — results part-entered, awaiting approval.
+      await mkBatch('mgst-undertest', 'RM-MGST', grn4.id, {
+        batchNumber: 'MGST/26/0119',
+        manufacturerLot: 'NP-3318',
+        qty: 100,
+        unit: 'kg',
+        containers: 4,
+        mfgAgo: 20,
+        expiryIn: 700,
+        status: 'UNDER_TEST',
+        location: 'Quarantine Store — Rack Q2',
+      });
+
+      // Quarantine — awaiting sampling. The stores screen's action item.
+      await mkBatch('alu-quarantine', 'PM-ALU', grn5.id, {
+        batchNumber: 'ALU/26/0402',
+        manufacturerLot: 'BC-11207',
+        qty: 350,
+        unit: 'kg',
+        containers: 7,
+        mfgAgo: 10,
+        expiryIn: 1400,
+        status: 'QUARANTINE',
+        location: 'Quarantine Store — Rack Q1',
+      });
+
+      // In-house finished product batch — no GRN, we made it.
+      await mkBatch('fp-undertest', 'FP-PCM500', null, {
+        batchNumber: 'PT/26/0455',
+        qty: 480000,
+        unit: 'nos',
+        containers: 12,
+        mfgAgo: 8,
+        expiryIn: 730,
+        status: 'UNDER_TEST',
+        location: 'FG Quarantine — Bay 4',
+      });
+
+      // ------------------------------------------------------------ analyzers
+      // A pharma QC lab runs chromatography and titration, not haematology
+      // analyzers. Instrument codes below are the labels those systems emit.
+      const mkDevice = async (data: {
+        code: string;
+        name: string;
+        manufacturer: string;
+        model: string;
+        serial: string;
+        department: string;
+        protocol: string;
+        location: string;
+        shadow?: boolean;
+        channels: [string, string][];
+      }) => {
+        const dev = await tx.device.create({
+          data: {
+            tenantId: TENANT_ID,
+            labId: unit1.id,
+            code: data.code,
+            name: data.name,
+            manufacturer: data.manufacturer,
+            model: data.model,
+            serialNumber: data.serial,
+            department: data.department as never,
+            protocol: data.protocol as never,
+            location: data.location,
+            status: data.shadow ? 'ENROLLED' : 'ACTIVE',
+            isShadowMode: data.shadow ?? false,
+            enrolmentCode: `DEMO-${data.code}-0001`,
+            enrolmentCodeExpiresAt: daysAhead(365),
+            lastCalibratedAt: daysAgo(45),
+            calibrationDueAt: daysAhead(320),
+          },
+        });
+        await tx.deviceChannel.createMany({
+          data: data.channels.map(([instrumentCode, analyteCode]) => ({
+            tenantId: TENANT_ID,
+            deviceId: dev.id,
+            instrumentCode,
+            analyteId: analytes.get(analyteCode)!,
+          })),
+        });
+        return dev;
+      };
+
+      await mkDevice({
+        code: 'CHEM-01',
+        name: 'HPLC — Assay & Related Substances',
+        manufacturer: 'Agilent',
+        model: '1260 Infinity II',
+        serial: 'DEAB-70412',
+        department: 'INSTRUMENTATION',
+        protocol: 'HL7_V2',
+        location: 'Instrument Room 1',
+        channels: [
+          ['ASSAY', 'ASSAY'],
+          ['RS_TOTAL', 'RSUB'],
+          ['RS_MAX', 'RSING'],
+          ['GLU', 'ASSAY'],
+        ],
+      });
+      await mkDevice({
+        code: 'KF-01',
+        name: 'Karl Fischer Titrator',
+        manufacturer: 'Metrohm',
+        model: '899 Coulometer',
+        serial: 'MT-33418',
+        department: 'INSTRUMENTATION',
+        protocol: 'ASTM_E1394',
+        location: 'Instrument Room 1',
+        channels: [
+          ['WATER', 'WATER'],
+          ['KF', 'WATER'],
+        ],
+      });
+      await mkDevice({
+        code: 'DISS-01',
+        name: 'Dissolution Apparatus (USP II)',
+        manufacturer: 'Electrolab',
+        model: 'TDT-08L',
+        serial: 'EL-90277',
+        department: 'INSTRUMENTATION',
+        protocol: 'FILE_CSV',
+        location: 'Dissolution Lab',
+        channels: [['DISS', 'DISS']],
+      });
+      await mkDevice({
+        code: 'GC-01',
+        name: 'GC — Residual Solvents',
+        manufacturer: 'Shimadzu',
+        model: 'Nexis GC-2030',
+        serial: 'SH-55190',
+        department: 'INSTRUMENTATION',
+        protocol: 'ASTM_E1394',
+        location: 'Instrument Room 2',
+        // Newest instrument, still being verified against manual results.
+        shadow: true,
+        channels: [['RESSOL', 'RESSOL']],
+      });
+      console.log(`    instruments  4 analyzers with channel mappings`);
+
+      // ------------------------------------------------------- QC / standards
+      // In a pharma QC lab the control is a working standard assayed against a
+      // reference standard, not a purchased clinical control serum.
+      const wsPcm = await tx.qcMaterial.create({
         data: {
           tenantId: TENANT_ID,
-          code: 'BIO-N',
-          name: 'Biochemistry Control — Normal',
-          manufacturer: 'Bio-Rad',
+          code: 'WS-PCM',
+          name: 'Paracetamol Working Standard',
+          manufacturer: 'In-house, against IP RS',
           level: 'LEVEL_1',
         },
       });
-      const qcMatHigh = await tx.qcMaterial.create({
+      const wsMet = await tx.qcMaterial.create({
         data: {
           tenantId: TENANT_ID,
-          code: 'BIO-P',
-          name: 'Biochemistry Control — Pathological',
-          manufacturer: 'Bio-Rad',
-          level: 'LEVEL_2',
+          code: 'WS-MET',
+          name: 'Metformin HCl Working Standard',
+          manufacturer: 'In-house, against IP RS',
+          level: 'LEVEL_1',
         },
       });
 
-      const qcLot = await tx.qcLot.create({
+      const lotPcm = await tx.qcLot.create({
         data: {
           tenantId: TENANT_ID,
-          qcMaterialId: qcMat.id,
-          lotNumber: '26071-N',
-          expiryDate: new Date('2027-06-30'),
-          openedAt: new Date('2026-07-01'),
+          qcMaterialId: wsPcm.id,
+          lotNumber: 'WS/PCM/26/03',
+          expiryDate: daysAhead(300),
+          openedAt: daysAgo(60),
         },
       });
-      const qcLotHigh = await tx.qcLot.create({
+      const lotMet = await tx.qcLot.create({
         data: {
           tenantId: TENANT_ID,
-          qcMaterialId: qcMatHigh.id,
-          lotNumber: '26071-P',
-          expiryDate: new Date('2027-06-30'),
-          openedAt: new Date('2026-07-01'),
+          qcMaterialId: wsMet.id,
+          lotNumber: 'WS/MET/26/02',
+          expiryDate: daysAhead(260),
+          openedAt: daysAgo(45),
         },
       });
 
       await tx.qcLotAnalyte.createMany({
         data: [
-          { lot: qcLot.id, a: 'GLUF', mean: 95, sd: 3.2, unit: 'mg/dL' },
-          { lot: qcLot.id, a: 'CREA', mean: 1.0, sd: 0.06, unit: 'mg/dL' },
-          { lot: qcLot.id, a: 'UREA', mean: 28, sd: 1.8, unit: 'mg/dL' },
-          { lot: qcLot.id, a: 'CHOL', mean: 175, sd: 6.5, unit: 'mg/dL' },
-          { lot: qcLotHigh.id, a: 'GLUF', mean: 265, sd: 8.4, unit: 'mg/dL' },
-          { lot: qcLotHigh.id, a: 'CREA', mean: 4.2, sd: 0.21, unit: 'mg/dL' },
-          { lot: qcLotHigh.id, a: 'UREA', mean: 78, sd: 3.9, unit: 'mg/dL' },
-          { lot: qcLotHigh.id, a: 'CHOL', mean: 285, sd: 9.1, unit: 'mg/dL' },
+          { lot: lotPcm.id, a: 'ASSAY', mean: 99.8, sd: 0.45, unit: '%' },
+          { lot: lotPcm.id, a: 'RSUB', mean: 0.08, sd: 0.012, unit: '%' },
+          { lot: lotPcm.id, a: 'WATER', mean: 0.22, sd: 0.03, unit: '%' },
+          { lot: lotMet.id, a: 'ASSAY', mean: 99.5, sd: 0.38, unit: '%' },
+          { lot: lotMet.id, a: 'WATER', mean: 0.31, sd: 0.04, unit: '%' },
         ].map((r) => ({
           tenantId: TENANT_ID,
           qcLotId: r.lot,
           analyteId: analytes.get(r.a)!,
-          targetMean: new Prisma.Decimal(r.mean),
-          targetSd: new Prisma.Decimal(r.sd),
+          targetMean: d(r.mean),
+          targetSd: d(r.sd),
           unit: r.unit,
         })),
       });
-      console.log(`    qc           2 materials, 2 lots, 8 analyte targets`);
+      console.log(`    qc standards 2 working standards, 2 lots, 5 analyte targets`);
 
-      // -----------------------------------------------------------------------
-      // Analyzers
+      // ------------------------------------------------- laboratory consumables
       //
-      // Devices start in SHADOW MODE: they capture and parse but write nothing,
-      // so a new analyzer can be validated against manual entries before it is
-      // trusted (INSTRUMENT_INTEGRATION.md §7).
-      // -----------------------------------------------------------------------
-      const haem = await tx.device.create({
-        data: {
-          tenantId: TENANT_ID,
-          labId: mainLab.id,
-          code: 'HAEM-01',
-          name: '5-Part Haematology Analyzer',
-          manufacturer: 'Sysmex',
-          model: 'XN-1000',
-          serialNumber: 'SN-XN-88421',
-          department: 'HAEMATOLOGY',
-          protocol: 'ASTM_E1394',
-          location: 'Haematology Bench 1',
-          status: 'ACTIVE',
-          isShadowMode: false,
-          enrolmentCode: 'DEMO-HAEM-0001',
-          enrolmentCodeExpiresAt: new Date(Date.now() + 365 * 864e5),
-          lastCalibratedAt: new Date('2026-07-01'),
-          calibrationDueAt: new Date('2027-01-01'),
-        },
-      });
-
-      const chem = await tx.device.create({
-        data: {
-          tenantId: TENANT_ID,
-          labId: mainLab.id,
-          code: 'CHEM-01',
-          name: 'Clinical Chemistry Autoanalyzer',
-          manufacturer: 'Beckman Coulter',
-          model: 'AU480',
-          serialNumber: 'SN-AU-33915',
-          department: 'BIOCHEMISTRY',
-          protocol: 'HL7_V2',
-          location: 'Biochemistry Bench 2',
-          status: 'ACTIVE',
-          isShadowMode: false,
-          enrolmentCode: 'DEMO-CHEM-0001',
-          enrolmentCodeExpiresAt: new Date(Date.now() + 365 * 864e5),
-          lastCalibratedAt: new Date('2026-07-05'),
-          calibrationDueAt: new Date('2027-01-05'),
-        },
-      });
-
-      const immuno = await tx.device.create({
-        data: {
-          tenantId: TENANT_ID,
-          labId: mainLab.id,
-          code: 'IMM-01',
-          name: 'CLIA Immunoassay Analyzer',
-          manufacturer: 'Roche',
-          model: 'cobas e411',
-          serialNumber: 'SN-CB-70233',
-          department: 'IMMUNOLOGY',
-          protocol: 'ASTM_E1394',
-          location: 'Immunoassay Bench',
-          status: 'ENROLLED',
-          // Still in shadow mode: newest analyzer, not yet verified against
-          // manual results. This is the safe default.
-          isShadowMode: true,
-          enrolmentCode: 'DEMO-IMM-0001',
-          enrolmentCodeExpiresAt: new Date(Date.now() + 365 * 864e5),
-        },
-      });
-
-      // Channel mappings — instrument's own code -> our analyte.
-      // Adding an analyzer is mostly filling in rows here.
-      const channel = (deviceId: string, instrumentCode: string, analyteCode: string) => ({
-        tenantId: TENANT_ID,
-        deviceId,
-        instrumentCode,
-        analyteId: analytes.get(analyteCode)!,
-      });
-
-      await tx.deviceChannel.createMany({
-        data: [
-          channel(haem.id, 'WBC', 'WBC'),
-          channel(haem.id, 'RBC', 'RBC'),
-          channel(haem.id, 'HGB', 'HB'),
-          channel(haem.id, 'HCT', 'HCT'),
-          channel(haem.id, 'MCV', 'MCV'),
-          channel(haem.id, 'MCH', 'MCH'),
-          channel(haem.id, 'MCHC', 'MCHC'),
-          channel(haem.id, 'PLT', 'PLT'),
-          channel(haem.id, 'NEUT%', 'NEUT'),
-          channel(haem.id, 'LYMPH%', 'LYMP'),
-          channel(haem.id, 'EO%', 'EOSI'),
-          channel(haem.id, 'MONO%', 'MONO'),
-
-          channel(chem.id, 'GLU', 'GLUF'),
-          channel(chem.id, 'BUN', 'UREA'),
-          channel(chem.id, 'CRE', 'CREA'),
-          channel(chem.id, 'UA', 'UA'),
-          channel(chem.id, 'NA', 'NA'),
-          channel(chem.id, 'K', 'K'),
-          channel(chem.id, 'CL', 'CL'),
-          channel(chem.id, 'CHOL', 'CHOL'),
-          channel(chem.id, 'TG', 'TRIG'),
-          channel(chem.id, 'HDLC', 'HDL'),
-          channel(chem.id, 'TBIL', 'TBIL'),
-          channel(chem.id, 'DBIL', 'DBIL'),
-          channel(chem.id, 'ALT', 'SGPT'),
-          channel(chem.id, 'AST', 'SGOT'),
-          channel(chem.id, 'ALP', 'ALP'),
-          channel(chem.id, 'TP', 'TPROT'),
-          channel(chem.id, 'ALB', 'ALB'),
-
-          channel(immuno.id, 'TSH', 'TSH'),
-          channel(immuno.id, 'T3', 'T3'),
-          channel(immuno.id, 'T4', 'T4'),
-        ],
-      });
-      console.log(`    devices      3 analyzers, 32 channel mappings`);
-
-
-      // -----------------------------------------------------------------------
-      // Inventory
-      //
-      // Deliberately seeded with a realistic mix INCLUDING one already-expired
-      // lot and one below its reorder level, so the alerts and the expired-lot
-      // gate are demonstrable without anyone having to wait for stock to age.
-      // -----------------------------------------------------------------------
-      const day = 864e5;
-      const inDays = (n: number) => new Date(Date.now() + n * day);
-
-      const invItems = await createMany(tx.inventoryItem, TENANT_ID, [
+      // A QC lab runs on columns, solvents, volumetric solutions and reference
+      // standards, every one of which has a lot number and an expiry that
+      // invalidates the result if it is missed. This is the same control the
+      // stores side applies to material batches, applied to the lab's own
+      // reagents — and it is what makes "which column was that assay run on?"
+      // answerable a year later.
+      const consumables = await createMany(tx.inventoryItem as never, TENANT_ID, [
         {
-          code: 'RGT-GLU',
-          name: 'Glucose (GOD-POD) Reagent',
-          category: 'REAGENT' as const,
-          unit: 'tests',
-          manufacturer: 'Erba Mannheim',
-          catalogNumber: 'BLT00016',
-          reorderLevel: new Prisma.Decimal(200),
-          storageCondition: '2-8°C',
+          code: 'COL-C18',
+          name: 'HPLC column, C18 250 × 4.6 mm, 5 µm',
+          category: 'CONSUMABLE',
+          unit: 'injections',
+          manufacturer: 'Waters',
+          catalogNumber: 'WAT054275',
+          reorderLevel: d(200),
+          storageCondition: 'Room temperature, capped in solvent',
         },
         {
-          code: 'RGT-CREA',
-          name: 'Creatinine (Jaffe) Reagent',
-          category: 'REAGENT' as const,
-          unit: 'tests',
-          manufacturer: 'Erba Mannheim',
-          reorderLevel: new Prisma.Decimal(150),
-          storageCondition: '2-8°C',
+          code: 'RGT-ACN',
+          name: 'Acetonitrile, HPLC grade',
+          category: 'REAGENT',
+          unit: 'mL',
+          manufacturer: 'Merck',
+          catalogNumber: '1.00030',
+          reorderLevel: d(2000),
+          storageCondition: 'Flammables cabinet, room temperature',
         },
         {
-          code: 'RGT-LIPID',
-          name: 'Lipid Panel Reagent Set',
-          category: 'REAGENT' as const,
-          unit: 'tests',
-          manufacturer: 'Beckman Coulter',
-          reorderLevel: new Prisma.Decimal(100),
-          storageCondition: '2-8°C',
+          code: 'RGT-KF',
+          name: 'Karl Fischer reagent, 5 mg/mL',
+          category: 'REAGENT',
+          unit: 'mL',
+          manufacturer: 'Merck',
+          catalogNumber: '1.09241',
+          reorderLevel: d(500),
+          storageCondition: 'Room temperature, protect from moisture',
         },
         {
-          code: 'CAL-CHEM',
-          name: 'Chemistry Multi-Calibrator',
-          category: 'CALIBRATOR' as const,
-          unit: 'vials',
-          manufacturer: 'Bio-Rad',
-          reorderLevel: new Prisma.Decimal(2),
-          storageCondition: '-20°C',
+          code: 'RGT-BUF68',
+          name: 'Phosphate buffer pH 6.8, dissolution medium',
+          category: 'REAGENT',
+          unit: 'mL',
+          manufacturer: 'In-house preparation',
+          reorderLevel: d(5000),
+          storageCondition: 'Room temperature, use within 7 days of preparation',
         },
         {
-          code: 'CON-EDTA',
-          name: 'EDTA Vacutainer 2mL',
-          category: 'CONSUMABLE' as const,
+          code: 'STD-PCM-RS',
+          name: 'Paracetamol reference standard, IP',
+          category: 'CALIBRATOR',
+          unit: 'mg',
+          manufacturer: 'Indian Pharmacopoeia Commission',
+          catalogNumber: 'IPRS-0142',
+          reorderLevel: d(200),
+          storageCondition: '2–8 °C, desiccated',
+        },
+        {
+          code: 'CON-FILT',
+          name: 'Syringe filter, 0.45 µm PVDF',
+          category: 'CONSUMABLE',
           unit: 'pieces',
-          manufacturer: 'BD',
-          reorderLevel: new Prisma.Decimal(500),
+          manufacturer: 'Pall',
+          catalogNumber: 'PN4560',
+          reorderLevel: d(100),
           storageCondition: 'Room temperature',
         },
-        {
-          code: 'CON-TIP',
-          name: 'Pipette Tips 1000µL',
-          category: 'CONSUMABLE' as const,
-          unit: 'pieces',
-          manufacturer: 'Tarsons',
-          reorderLevel: new Prisma.Decimal(1000),
-          storageCondition: 'Room temperature',
-        },
-      ]);
+      ] as never);
 
-      const lots: {
+      // Lots, including the two awkward states a stock screen must show: one
+      // below its reorder level, and one already expired that the system has to
+      // refuse rather than merely flag.
+      const lotRows: {
         item: string;
-        lotNumber: string;
-        qty: number;
-        expiryDays: number | null;
+        lot: string;
+        received: number;
+        remaining: number;
+        expiry: Date;
         supplier: string;
+        status?: string;
+        opened?: Date;
       }[] = [
-        // Healthy stock
-        { item: 'RGT-GLU', lotNumber: 'GL-26041', qty: 800, expiryDays: 240, supplier: 'Medisys Hyderabad' },
-        { item: 'RGT-CREA', lotNumber: 'CR-26019', qty: 600, expiryDays: 180, supplier: 'Medisys Hyderabad' },
-        { item: 'CON-EDTA', lotNumber: 'BD-2609', qty: 2400, expiryDays: 500, supplier: 'BD India' },
-        { item: 'CON-TIP', lotNumber: 'TR-88120', qty: 4800, expiryDays: null, supplier: 'Tarsons' },
-        // Expiring soon — drives the amber alert
-        { item: 'RGT-LIPID', lotNumber: 'LP-25330', qty: 220, expiryDays: 18, supplier: 'Beckman India' },
-        // Below reorder level
-        { item: 'CAL-CHEM', lotNumber: 'CAL-2611', qty: 1, expiryDays: 120, supplier: 'Bio-Rad India' },
-        // ALREADY EXPIRED — consuming from this is refused by the gate
-        { item: 'RGT-GLU', lotNumber: 'GL-25008', qty: 150, expiryDays: -12, supplier: 'Medisys Hyderabad' },
+        {
+          item: 'COL-C18',
+          lot: 'C18/0224/117',
+          received: 1500,
+          remaining: 862,
+          expiry: daysAhead(410),
+          supplier: 'Waters India Pvt Ltd',
+          opened: daysAgo(120),
+        },
+        {
+          item: 'RGT-ACN',
+          lot: 'ACN/26/K441',
+          received: 20000,
+          remaining: 13400,
+          expiry: daysAhead(300),
+          supplier: 'Merck Life Science',
+          opened: daysAgo(40),
+        },
+        {
+          item: 'RGT-KF',
+          lot: 'KF/26/0087',
+          received: 4000,
+          remaining: 380,
+          expiry: daysAhead(95),
+          supplier: 'Merck Life Science',
+          opened: daysAgo(30),
+        },
+        {
+          item: 'RGT-BUF68',
+          lot: 'BUF/26/0311',
+          received: 20000,
+          remaining: 11200,
+          expiry: daysAhead(4),
+          supplier: 'In-house, QC prep room',
+          opened: daysAgo(3),
+        },
+        {
+          item: 'STD-PCM-RS',
+          lot: 'IPRS/PCM/0142/C',
+          received: 500,
+          remaining: 318,
+          expiry: daysAhead(220),
+          supplier: 'IPC Ghaziabad',
+          opened: daysAgo(75),
+        },
+        {
+          // Deliberately expired, and deliberately still AVAILABLE: the vial is
+          // physically on the shelf because nobody has swept it yet. That is the
+          // state the gate has to catch. Marking it EXPIRED here would remove it
+          // from stock and quietly prove nothing.
+          item: 'STD-PCM-RS',
+          lot: 'IPRS/PCM/0138/B',
+          received: 500,
+          remaining: 96,
+          expiry: daysAgo(35),
+          supplier: 'IPC Ghaziabad',
+          opened: daysAgo(300),
+        },
+        {
+          item: 'CON-FILT',
+          lot: 'PVDF/25/8842',
+          received: 1000,
+          remaining: 640,
+          expiry: daysAhead(500),
+          supplier: 'Pall India',
+        },
       ];
 
-      for (const l of lots) {
-        const qty = new Prisma.Decimal(l.qty);
-        const lot = await tx.inventoryLot.create({
+      for (const r of lotRows) {
+        await tx.inventoryLot.create({
           data: {
             tenantId: TENANT_ID,
-            itemId: invItems.get(l.item)!,
-            lotNumber: l.lotNumber,
-            expiryDate: l.expiryDays === null ? null : inDays(l.expiryDays),
-            quantityReceived: qty,
-            quantityRemaining: qty,
-            supplier: l.supplier,
-            receivedBy: admin.id,
-            status: 'AVAILABLE',
-          },
-        });
-        await tx.stockTransaction.create({
-          data: {
-            tenantId: TENANT_ID,
-            lotId: lot.id,
-            type: 'RECEIPT',
-            quantity: qty,
-            balanceAfter: qty,
-            reason: 'Opening stock',
-            performedBy: admin.id,
+            itemId: consumables.get(r.item)!,
+            lotNumber: r.lot,
+            expiryDate: r.expiry,
+            quantityReceived: d(r.received),
+            quantityRemaining: d(r.remaining),
+            supplier: r.supplier,
+            receivedAt: daysAgo(130),
+            receivedBy: analyst.id,
+            openedAt: r.opened ?? null,
+            status: (r.status ?? 'AVAILABLE') as never,
           },
         });
       }
 
-      // How much of each item one run of a test consumes. This is what makes
-      // stock decrement automatically when results are entered.
-      await tx.testReagentUsage.createMany({
-        data: [
-          { test: 'GLUF', item: 'RGT-GLU', qty: 1 },
-          { test: 'KFT', item: 'RGT-CREA', qty: 1 },
-          { test: 'LIPID', item: 'RGT-LIPID', qty: 1 },
-          { test: 'CBC', item: 'CON-EDTA', qty: 1 },
-        ].map((u) => ({
-          tenantId: TENANT_ID,
-          testDefinitionId: tests.get(u.test)!,
-          inventoryItemId: invItems.get(u.item)!,
-          quantityPerTest: new Prisma.Decimal(u.qty),
-        })),
-      });
-
-      console.log(
-        `    inventory    ${invItems.size} items, ${lots.length} lots (1 expired, 1 expiring, 1 low), 4 usage rules`,
-      );
-
-      // -----------------------------------------------------------------------
-      // Demo patients + orders
-      // -----------------------------------------------------------------------
-      const mkPatient = async (
-        code: string,
-        name: string,
-        sex: 'MALE' | 'FEMALE',
-        ageYears: number,
-        phone: string,
-      ) => {
-        const patientKey = generateKey();
-        return tx.patient.create({
+      // What each method consumes per run. This is what makes stock fall by
+      // itself when a result is entered, instead of by someone remembering to
+      // write it in a register.
+      const usageRows: [string, string, number][] = [
+        ['TASSAY', 'COL-C18', 1],
+        ['TASSAY', 'RGT-ACN', 45],
+        ['TASSAY', 'STD-PCM-RS', 25],
+        ['TASSAY', 'CON-FILT', 2],
+        ['TWATER', 'RGT-KF', 12],
+        ['TDISS', 'RGT-BUF68', 900],
+        ['TDISS', 'CON-FILT', 6],
+        ['TRSUB', 'COL-C18', 1],
+        ['TRSUB', 'RGT-ACN', 60],
+      ];
+      for (const [testCode, itemCode, qty] of usageRows) {
+        const testId = tests.get(testCode);
+        const itemId = consumables.get(itemCode);
+        if (!testId || !itemId) continue;
+        await tx.testReagentUsage.create({
           data: {
             tenantId: TENANT_ID,
-            patientCode: code,
-            nameEnc: encrypt(name, patientKey),
-            nameIdx: blindIndex(name, blindIndexKey, 'patient.name'),
-            phoneEnc: encrypt(phone, patientKey),
-            phoneIdx: blindIndex(phone, blindIndexKey, 'patient.phone'),
-            dataKeyEnc: wrapKey(patientKey, tenantDek),
-            sex,
-            ageYears,
+            testDefinitionId: testId,
+            inventoryItemId: itemId,
+            quantityPerTest: d(qty),
           },
         });
+      }
+      console.log(
+        `    consumables  ${consumables.size} items, ${lotRows.length} lots (1 expired), ${usageRows.length} method links`,
+      );
+
+      console.log(`    batches      ${batches.size} across quarantine / under test / approved / rejected`);
+
+      console.log('');
+      return {
+        unit1,
+        admin,
+        qa,
+        qa2,
+        analyst,
+        analyst2,
+        stores,
+        auditor,
+        tests,
+        analytes,
+        specs,
+        materials,
+        batches,
+        specimens,
+        containers,
       };
+    },
+    { timeout: 240_000, maxWait: 20_000 },
+  );
 
-      const patients = await Promise.all([
-        mkPatient('SUN000001', 'Ramesh Kumar', 'MALE', 52, '+919848012345'),
-        mkPatient('SUN000002', 'Lakshmi Devi', 'FEMALE', 38, '+919848012346'),
-        mkPatient('SUN000003', 'Imran Sheikh', 'MALE', 29, '+919848012347'),
-        mkPatient('SUN000004', 'Sunita Patel', 'FEMALE', 45, '+919848012348'),
-      ]);
-      console.log(`    patients     ${patients.length} (identifiers encrypted per patient)`);
+  // Stage two runs in its own transaction: the first is already long, and the
+  // workflow data below depends on everything above being committed.
+  await seedWorkflow();
 
-      // A few orders in different workflow states, so every screen has content.
-      const today = new Date();
-      const yy = String(today.getFullYear()).slice(2);
-      const mm = String(today.getMonth() + 1).padStart(2, '0');
-      const dd = String(today.getDate()).padStart(2, '0');
-      const datePart = `${yy}${mm}${dd}`;
+  console.log('\n  Seed complete.\n');
+  console.log('  Sign in at https://localhost');
+  console.log('    Tenant code : VANTAGE');
+  console.log(`    Password    : ${DEMO_PASSWORD}   (all demo users)\n`);
+  console.log('    admin@vantage.test      Head of Quality — full access');
+  console.log('    qa@vantage.test         QA Manager — approves results, dispositions batches, issues COA');
+  console.log('    qc@vantage.test    QC Analyst — enters and verifies results, cannot approve');
+  console.log('    stores@vantage.test     Stores Officer — goods receipt, quarantine, issue');
+  console.log('    auditor@vantage.test    Auditor — read-only + full audit trail\n');
+}
 
-      let accessionSeq = 0;
-      const nextAccession = () => `HYD${datePart}${String(++accessionSeq).padStart(5, '0')}`;
+/**
+ * Orders, samples, results, dispositions, OOS and the COA.
+ *
+ * Separated from the setup transaction because it reads back what that
+ * committed, and because a single 300-line transaction holding a connection is
+ * exactly the pattern ADR 0002 warns about.
+ */
+async function seedWorkflow(): Promise<void> {
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${TENANT_ID}, true)`;
 
-      const mkOrder = async (
-        patientIndex: number,
+      const unit = await tx.lab.findFirstOrThrow({ where: { code: 'U1' } });
+      const qa = await tx.user.findFirstOrThrow({ where: { email: 'qa@vantage.test' } });
+      const analyst = await tx.user.findFirstOrThrow({ where: { email: 'qc@vantage.test' } });
+      const stores = await tx.user.findFirstOrThrow({ where: { email: 'stores@vantage.test' } });
+
+      const batchByNumber = async (n: string) =>
+        tx.materialBatch.findFirstOrThrow({ where: { batchNumber: n }, include: { material: true } });
+
+      const testByCode = async (c: string) =>
+        tx.testDefinition.findFirstOrThrow({
+          where: { code: c },
+          include: { analytes: { include: { analyte: true }, orderBy: { sortOrder: 'asc' } } },
+        });
+
+      const analyteByCode = async (c: string) =>
+        tx.analyte.findFirstOrThrow({ where: { code: c } });
+
+      let orderSeq = 0;
+      let arSeq = 0;
+      let reqSeq = 0;
+
+      /**
+       * Raises a sampling request, the order QC works to, and the sample drawn
+       * against a batch — the manufacturing equivalent of registering a patient
+       * and accessioning their specimen.
+       */
+      const bookBatch = async (
+        batchNumber: string,
         testCodes: string[],
-        sampleStatus: 'RECEIVED' | 'IN_PROGRESS' | 'COMPLETED',
-        testStatus: 'PENDING' | 'IN_PROGRESS' | 'RESULT_ENTERED' | 'TECH_VERIFIED',
-        orderSeq: number,
+        opts: {
+          status: 'PENDING' | 'SAMPLED';
+          testStatus: 'PENDING' | 'IN_PROGRESS' | 'RESULT_ENTERED' | 'TECH_VERIFIED' | 'AUTHORIZED';
+          ago: number;
+        },
       ) => {
-        const patient = patients[patientIndex]!;
+        const batch = await batchByNumber(batchNumber);
+        reqSeq++;
+
+        const stamp = daysAgo(opts.ago);
+        const yymmdd = `${String(stamp.getFullYear()).slice(2)}${String(stamp.getMonth() + 1).padStart(2, '0')}${String(stamp.getDate()).padStart(2, '0')}`;
+
+        if (opts.status === 'PENDING') {
+          // Awaiting sampling — no order yet. This is the stores/QC action item.
+          await tx.samplingRequest.create({
+            data: {
+              tenantId: TENANT_ID,
+              batchId: batch.id,
+              requestNumber: `SR/26/${String(reqSeq).padStart(4, '0')}`,
+              reason: 'RELEASE_TESTING',
+              status: 'PENDING',
+              requestedBy: stores.id,
+              requestedAt: stamp,
+              note: `Awaiting QC sampling — ${batch.containerCount} containers in quarantine.`,
+            },
+          });
+          return null;
+        }
+
+        orderSeq++;
         const order = await tx.labOrder.create({
           data: {
             tenantId: TENANT_ID,
-            labId: mainLab.id,
-            orderNumber: `ORD${datePart}${String(orderSeq).padStart(4, '0')}`,
-            patientId: patient.id,
-            referringDoctorId: doctors.get('DR001')!,
+            labId: unit.id,
+            orderNumber: `AR/26/${String(orderSeq).padStart(4, '0')}`,
+            batchId: batch.id,
             priority: 'ROUTINE',
-            createdBy: reception.id,
+            clinicalNotes: `Release testing — ${batch.material.name}, batch ${batch.batchNumber}`,
+            orderedAt: stamp,
+            createdBy: stores.id,
           },
         });
 
-        let total = new Prisma.Decimal(0);
-        const orderItems = [];
-        for (const tc of testCodes) {
-          const td = await tx.testDefinition.findFirstOrThrow({ where: { id: tests.get(tc)! } });
-          const item = await tx.orderItem.create({
-            data: {
-              tenantId: TENANT_ID,
-              orderId: order.id,
-              testDefinitionId: td.id,
-              unitPrice: td.price,
-              netAmount: td.price,
-            },
-          });
-          orderItems.push({ item, td });
-          total = total.add(td.price);
-        }
+        await tx.samplingRequest.create({
+          data: {
+            tenantId: TENANT_ID,
+            batchId: batch.id,
+            requestNumber: `SR/26/${String(reqSeq).padStart(4, '0')}`,
+            reason: 'RELEASE_TESTING',
+            status: 'SAMPLED',
+            requestedBy: stores.id,
+            requestedAt: stamp,
+            orderId: order.id,
+            sampledBy: analyst.id,
+            sampledAt: stamp,
+            // √n + 1 is the standard sampling plan for identification.
+            containersSampled: Math.max(1, Math.ceil(Math.sqrt(batch.containerCount ?? 1)) + 1),
+            quantitySampled: d(0.25),
+          },
+        });
 
+        arSeq++;
         const sample = await tx.sample.create({
           data: {
             tenantId: TENANT_ID,
-            labId: mainLab.id,
+            labId: unit.id,
             orderId: order.id,
-            accessionNumber: nextAccession(),
-            barcode: nextBarcode(),
-            patientId: patient.id,
-            specimenTypeId: specimens.get('SER')!,
-            containerTypeId: containers.get('YEL')!,
-            status: sampleStatus,
-            collectedAt: new Date(Date.now() - 3 * 3600e3),
-            collectedBy: reception.id,
-            receivedAt: new Date(Date.now() - 2.5 * 3600e3),
-            receivedBy: technician.id,
-            createdBy: reception.id,
+            accessionNumber: `U1${yymmdd}${String(arSeq).padStart(5, '0')}`,
+            barcode: `U1${yymmdd}${String(arSeq).padStart(5, '0')}`,
+            status: opts.testStatus === 'PENDING' ? 'RECEIVED' : 'IN_PROGRESS',
+            collectedAt: stamp,
+            collectedBy: analyst.id,
+            collectionSite: batch.location,
+            receivedAt: stamp,
+            receivedBy: analyst.id,
+            createdBy: analyst.id,
           },
         });
 
-        for (const { item, td } of orderItems) {
-          await tx.sampleTest.create({
+        const sampleTests = [];
+        for (const code of testCodes) {
+          const td = await testByCode(code);
+          const st = await tx.sampleTest.create({
             data: {
               tenantId: TENANT_ID,
               sampleId: sample.id,
-              orderItemId: item.id,
               testDefinitionId: td.id,
               testVersion: td.version,
-              status: testStatus,
-              deviceId: td.department === 'HAEMATOLOGY' ? haem.id : chem.id,
-              startedAt: testStatus === 'PENDING' ? null : new Date(Date.now() - 2 * 3600e3),
-              dueAt: new Date(Date.now() + (td.tatMinutes ?? 240) * 60e3 - 2 * 3600e3),
+              status: opts.testStatus,
+              startedAt: opts.testStatus === 'PENDING' ? null : stamp,
+              resultAt: ['RESULT_ENTERED', 'TECH_VERIFIED', 'AUTHORIZED'].includes(opts.testStatus)
+                ? stamp
+                : null,
+              enteredBy: ['RESULT_ENTERED', 'TECH_VERIFIED', 'AUTHORIZED'].includes(opts.testStatus)
+                ? analyst.id
+                : null,
+              verifiedAt: ['TECH_VERIFIED', 'AUTHORIZED'].includes(opts.testStatus) ? stamp : null,
+              verifiedBy: ['TECH_VERIFIED', 'AUTHORIZED'].includes(opts.testStatus) ? analyst.id : null,
+              authorizedAt: opts.testStatus === 'AUTHORIZED' ? stamp : null,
+              authorizedBy: opts.testStatus === 'AUTHORIZED' ? qa.id : null,
+              dueAt: new Date(stamp.getTime() + (td.tatMinutes ?? 480) * 60_000),
             },
           });
+          sampleTests.push({ st, td });
         }
 
-        // GST: diagnostic services are largely exempt, hence 0% here. The
-        // machinery exists because non-clinical services are not exempt.
-        await tx.invoice.create({
+        return { batch, order, sample, sampleTests, stamp };
+      };
+
+      /** Writes a result with its spec limit snapshotted onto the row. */
+      const putResult = async (
+        sampleTestId: string,
+        analyteCode: string,
+        value: string,
+        opts: { numeric?: number; flag?: string; critical?: boolean; when: Date; unit?: string; ref?: string },
+      ) => {
+        const analyte = await analyteByCode(analyteCode);
+        await tx.result.create({
           data: {
             tenantId: TENANT_ID,
-            labId: mainLab.id,
-            orderId: order.id,
-            invoiceNumber: `INV${datePart}${String(orderSeq).padStart(4, '0')}`,
-            customerType: 'B2C',
-            customerName: 'Walk-in Patient',
-            placeOfSupply: '36',
-            subTotal: total,
-            taxableAmount: total,
-            totalAmount: total,
-            status: 'UNPAID',
-            createdBy: reception.id,
+            sampleTestId,
+            analyteId: analyte.id,
+            version: 1,
+            isCurrent: true,
+            value,
+            numericValue: opts.numeric !== undefined ? d(opts.numeric) : null,
+            unit: opts.unit ?? analyte.defaultUnit,
+            refDisplay: opts.ref ?? null,
+            flag: (opts.flag ?? 'NORMAL') as never,
+            isCritical: opts.critical ?? false,
+            source: 'MANUAL',
+            enteredBy: analyst.id,
+            enteredAt: opts.when,
+          },
+        });
+      };
+
+      // ------------------------------------------------- 1. approved batch + COA
+      const approved = await bookBatch('PCM/26/0141', ['TDESC', 'TIDEN', 'TASSAY', 'TLOD', 'TRSUB'], {
+        status: 'SAMPLED',
+        testStatus: 'AUTHORIZED',
+        ago: 22,
+      });
+
+      if (approved) {
+        const w = approved.stamp;
+        const byCode = Object.fromEntries(approved.sampleTests.map((x) => [x.td.code, x.st.id]));
+        await putResult(byCode.TDESC!, 'DESC', 'White crystalline powder', { when: w, ref: 'White crystalline powder' });
+        await putResult(byCode.TIDEN!, 'IDEN', 'Complies', { when: w, ref: 'Complies by IR' });
+        await putResult(byCode.TASSAY!, 'ASSAY', '99.62', { numeric: 99.62, when: w, unit: '%', ref: '98.0 – 102.0' });
+        await putResult(byCode.TLOD!, 'LOD', '0.21', { numeric: 0.21, when: w, unit: '%', ref: 'NMT 0.5' });
+        await putResult(byCode.TRSUB!, 'RSUB', '0.114', { numeric: 0.114, when: w, unit: '%', ref: 'NMT 0.5' });
+        await putResult(byCode.TRSUB!, 'RSING', '0.041', { numeric: 0.041, when: w, unit: '%', ref: 'NMT 0.1' });
+
+        await tx.batchDisposition.create({
+          data: {
+            tenantId: TENANT_ID,
+            batchId: approved.batch.id,
+            decision: 'APPROVED',
+            rationale:
+              'All tests comply with SPEC/API-PCM/01 v1. Assay 99.62% (98.0–102.0), total related substances ' +
+              '0.114% (NMT 0.5%). Supplier COA cross-checked and consistent. Released for manufacturing use.',
+            decidedBy: qa.id,
+            decidedAt: daysAgo(18),
           },
         });
 
-        return { order, sample };
-      };
+        const spec = await tx.specification.findFirstOrThrow({ where: { code: 'SPEC/API-PCM/01' } });
+        await tx.certificateOfAnalysis.create({
+          data: {
+            tenantId: TENANT_ID,
+            batchId: approved.batch.id,
+            coaNumber: 'COA/26/0141',
+            version: 1,
+            specificationId: spec.id,
+            issuedBy: qa.id,
+            issuedAt: daysAgo(18),
+          },
+        });
+      }
 
-      await mkOrder(0, ['CBC', 'LIPID'], 'IN_PROGRESS', 'IN_PROGRESS', 1);
-      await mkOrder(1, ['THYRO'], 'RECEIVED', 'PENDING', 2);
-      await mkOrder(2, ['KFT', 'LFT'], 'IN_PROGRESS', 'RESULT_ENTERED', 3);
-      await mkOrder(3, ['CBC', 'GLUF', 'HBA1C'], 'IN_PROGRESS', 'TECH_VERIFIED', 4);
-
-      // Counters MUST reflect what the seed already created, or the API's first
-      // generated identifier collides with a seeded one. Every sequence the
-      // seed consumed by hand is handed back here.
-      await tx.accessionCounter.createMany({
-        data: [
-          {
-            tenantId: TENANT_ID,
-            labId: mainLab.id,
-            scope: `SAMPLE:${today.toISOString().slice(0, 10)}`,
-            counter: accessionSeq,
-          },
-          {
-            tenantId: TENANT_ID,
-            labId: mainLab.id,
-            scope: 'PATIENT',
-            counter: patients.length,
-          },
-          {
-            tenantId: TENANT_ID,
-            labId: mainLab.id,
-            scope: `ORDER:${today.toISOString().slice(0, 10)}`,
-            counter: 4,
-          },
-          {
-            tenantId: TENANT_ID,
-            labId: mainLab.id,
-            scope: `INVOICE:${financialYear(today)}`,
-            counter: 4,
-          },
-        ],
+      // ------------------------------------------- 2. rejected batch + closed OOS
+      const rejected = await bookBatch('MET/26/0087', ['TDESC', 'TIDEN', 'TASSAY', 'TWATER'], {
+        status: 'SAMPLED',
+        testStatus: 'AUTHORIZED',
+        ago: 14,
       });
 
-      console.log(`    orders       4 across different workflow states\n`);
-    },
-    { timeout: 180_000, maxWait: 20_000 },
-  );
+      if (rejected) {
+        const w = rejected.stamp;
+        const byCode = Object.fromEntries(rejected.sampleTests.map((x) => [x.td.code, x.st.id]));
+        await putResult(byCode.TDESC!, 'DESC', 'White crystalline powder', { when: w, ref: 'White crystalline powder' });
+        await putResult(byCode.TIDEN!, 'IDEN', 'Complies', { when: w, ref: 'Complies by IR' });
+        // The failure: assay below the lower limit.
+        await putResult(byCode.TASSAY!, 'ASSAY', '96.80', {
+          numeric: 96.8,
+          when: w,
+          unit: '%',
+          ref: '98.5 – 101.0',
+          flag: 'LOW',
+          critical: true,
+        });
+        await putResult(byCode.TWATER!, 'WATER', '0.34', { numeric: 0.34, when: w, unit: '%', ref: 'NMT 0.5' });
 
-  console.log('  Seed complete.\n');
-  console.log('  Sign in at http://localhost:3100');
-  console.log('    Tenant code : SUNRISE');
-  console.log(`    Password    : ${DEMO_PASSWORD}   (all demo users)\n`);
-  console.log('    admin@sunrise.test        Lab Administrator');
-  console.log('    pathologist@sunrise.test  Pathologist  — can authorise');
-  console.log('    tech@sunrise.test         Technician   — can enter/verify, NOT authorise');
-  console.log('    front@sunrise.test        Front desk   — registration & billing');
-  console.log('    auditor@sunrise.test      Auditor      — read-only + audit trail\n');
+        const failing = await tx.result.findFirstOrThrow({
+          where: { sampleTestId: byCode.TASSAY!, analyte: { code: 'ASSAY' } },
+        });
+
+        await tx.oosInvestigation.create({
+          data: {
+            tenantId: TENANT_ID,
+            batchId: rejected.batch.id,
+            resultId: failing.id,
+            investigationNumber: 'OOS/26/0007',
+            observedValue: '96.80 %',
+            limitBreached: 'Assay 98.5 – 101.0 %',
+            analyteCode: 'ASSAY',
+            phase: 'PHASE_II',
+            status: 'CLOSED',
+            labInvestigationNote:
+              'Phase I: analyst interview, calculation re-check, standard and sample preparation reviewed. ' +
+              'System suitability within limits; column and mobile phase in date. No laboratory error identified.',
+            manufacturingNote:
+              'Phase II: supplier contacted. Their retained sample assayed 97.1% against our 96.8%, confirming ' +
+              'the result reflects the material rather than our method.',
+            rootCause:
+              'Material does not meet the registered specification. Supplier attributes it to a drying-stage ' +
+              'deviation at their plant (their deviation ref HF/DEV/26/044).',
+            conclusion: 'MANUFACTURING_CONFIRMED',
+            correctiveAction:
+              'Batch rejected and quarantined in the locked rejected store pending return to supplier. ' +
+              'Supplier placed under enhanced incoming scrutiny for the next three consignments. ' +
+              'Vendor qualification review raised as CAPA/26/0031.',
+            openedBy: analyst.id,
+            openedAt: daysAgo(13),
+            closedBy: qa.id,
+            closedAt: daysAgo(10),
+          },
+        });
+
+        await tx.batchDisposition.create({
+          data: {
+            tenantId: TENANT_ID,
+            batchId: rejected.batch.id,
+            decision: 'REJECTED',
+            rationale:
+              'Assay 96.80% against a specification of 98.5–101.0%. OOS/26/0007 closed with cause confirmed as ' +
+              'manufacturing, not laboratory. Batch rejected in full; return to supplier initiated.',
+            deviationRef: 'OOS/26/0007',
+            decidedBy: qa.id,
+            decidedAt: daysAgo(9),
+          },
+        });
+      }
+
+      // --------------------------------------- 3. approved with deviation (MCC)
+      const deviation = await bookBatch('MCC/26/0233', ['TDESC', 'TLOD', 'TPHYS', 'TMLT'], {
+        status: 'SAMPLED',
+        testStatus: 'AUTHORIZED',
+        ago: 8,
+      });
+
+      if (deviation) {
+        const w = deviation.stamp;
+        const byCode = Object.fromEntries(deviation.sampleTests.map((x) => [x.td.code, x.st.id]));
+        await putResult(byCode.TDESC!, 'DESC', 'White to off-white powder', { when: w, ref: 'White to off-white powder' });
+        await putResult(byCode.TLOD!, 'LOD', '3.94', { numeric: 3.94, when: w, unit: '%', ref: 'NMT 5.0' });
+        await putResult(byCode.TPHYS!, 'PH', '6.42', { numeric: 6.42, when: w, ref: '5.0 – 7.5' });
+        // Non-critical excursion: bulk density marginally low.
+        await putResult(byCode.TPHYS!, 'BDEN', '0.271', {
+          numeric: 0.271,
+          when: w,
+          unit: 'g/mL',
+          ref: '0.28 – 0.38',
+          flag: 'LOW',
+        });
+        await putResult(byCode.TPHYS!, 'PSIZE', '118.4', { numeric: 118.4, when: w, unit: 'µm' });
+        await putResult(byCode.TMLT!, 'TAMC', '40', { numeric: 40, when: w, unit: 'cfu/g', ref: 'NMT 1000' });
+        await putResult(byCode.TMLT!, 'TYMC', '10', { numeric: 10, when: w, unit: 'cfu/g' });
+        await putResult(byCode.TMLT!, 'ECOLI', 'Absent', { when: w, ref: 'Absent' });
+
+        await tx.batchDisposition.create({
+          data: {
+            tenantId: TENANT_ID,
+            batchId: deviation.batch.id,
+            decision: 'APPROVED_WITH_DEVIATION',
+            rationale:
+              'Bulk density 0.271 g/mL against 0.28–0.38 g/mL — a NON-CRITICAL parameter. All critical parameters ' +
+              'comply. Formulation development confirmed (memo FD/26/118) that the granulation for PT/26 is ' +
+              'insensitive to bulk density in this range. Released restricted to wet-granulation products only; ' +
+              'NOT to be used for direct compression.',
+            deviationRef: 'DEV/26/0088',
+            decidedBy: qa.id,
+            decidedAt: daysAgo(5),
+          },
+        });
+      }
+
+      // ----------------------------------------- 4. under test, awaiting approval
+      const underTest = await bookBatch('MGST/26/0119', ['TDESC', 'TASSAY', 'TLOD'], {
+        status: 'SAMPLED',
+        testStatus: 'TECH_VERIFIED',
+        ago: 3,
+      });
+
+      if (underTest) {
+        const w = underTest.stamp;
+        const byCode = Object.fromEntries(underTest.sampleTests.map((x) => [x.td.code, x.st.id]));
+        await putResult(byCode.TDESC!, 'DESC', 'White to off-white powder', { when: w, ref: 'White to off-white powder' });
+        await putResult(byCode.TASSAY!, 'ASSAY', '4.42', { numeric: 4.42, when: w, unit: '%', ref: '4.0 – 5.0' });
+        await putResult(byCode.TLOD!, 'LOD', '3.11', { numeric: 3.11, when: w, unit: '%', ref: 'NMT 6.0' });
+      }
+
+      // ---------------------------- 5. finished product in progress (partial data)
+      const fp = await bookBatch('PT/26/0455', ['TDESC', 'TASSAY', 'TDISS', 'TTAB'], {
+        status: 'SAMPLED',
+        testStatus: 'RESULT_ENTERED',
+        ago: 2,
+      });
+
+      if (fp) {
+        const w = fp.stamp;
+        const byCode = Object.fromEntries(fp.sampleTests.map((x) => [x.td.code, x.st.id]));
+        await putResult(byCode.TDESC!, 'DESC', 'White capsule-shaped uncoated tablets', {
+          when: w,
+          ref: 'White capsule-shaped uncoated tablets',
+        });
+        await putResult(byCode.TASSAY!, 'ASSAY', '99.10', { numeric: 99.1, when: w, unit: '%', ref: '95.0 – 105.0' });
+        // Dissolution below the limit. This is the one investigation left OPEN:
+        // a QA desk always has live work, and an empty investigation queue makes
+        // the release gate look decorative rather than load-bearing.
+        await putResult(byCode.TDISS!, 'DISS', '76.5', {
+          numeric: 76.5,
+          when: w,
+          unit: '%',
+          ref: 'NLT 80',
+          flag: 'LOW',
+          critical: true,
+        });
+        // Tablet physicals still on the bench — deliberately left for the demo.
+
+        const failingDiss = await tx.result.findFirstOrThrow({
+          where: { sampleTestId: byCode.TDISS!, analyte: { code: 'DISS' } },
+        });
+
+        await tx.oosInvestigation.create({
+          data: {
+            tenantId: TENANT_ID,
+            batchId: fp.batch.id,
+            resultId: failingDiss.id,
+            investigationNumber: 'OOS/26/0012',
+            observedValue: '76.5 %',
+            limitBreached: 'Dissolution NLT 80 % in 30 min',
+            analyteCode: 'DISS',
+            phase: 'PHASE_I',
+            status: 'OPEN',
+            labInvestigationNote:
+              'Phase I in progress: analyst interview complete, no calculation error found. Medium ' +
+              'preparation and de-aeration records under review; paddle height and rotation speed to be ' +
+              're-verified against the calibration record for DISS-01 before any re-test is authorised.',
+            openedBy: analyst.id,
+            openedAt: daysAgo(1),
+          },
+        });
+      }
+
+      // ------------------------------- 6. quarantine, awaiting sampling (no order)
+      await bookBatch('ALU/26/0402', [], { status: 'PENDING', testStatus: 'PENDING', ago: 2 });
+
+      console.log(`    workflow     ${orderSeq} AR numbers, ${reqSeq} sampling requests`);
+      console.log('    dispositions 1 approved · 1 rejected (OOS) · 1 approved-with-deviation');
+      console.log('    oos          OOS/26/0007 closed · OOS/26/0012 OPEN (dissolution, Phase I)');
+      console.log('    coa          COA/26/0141 issued for PCM/26/0141');
+    },
+    { timeout: 240_000, maxWait: 20_000 },
+  );
 }
 
-/** Bulk-create rows that all share the tenant, returning a code -> id map. */
+/** Bulk-creates rows sharing the tenant, returning a code -> id map. */
 async function createMany<T extends { code: string }>(
   model: { create: (args: { data: unknown }) => Promise<{ id: string; code: string }> },
   tenantId: string,
@@ -1184,16 +1635,6 @@ async function createMany<T extends { code: string }>(
     map.set(created.code, created.id);
   }
   return map;
-}
-
-let barcodeCounter = 100000;
-const nextBarcode = () => `BC${++barcodeCounter}`;
-
-/** India's financial year starts 1 April. Must match AccessionService. */
-function financialYear(d: Date): string {
-  const year = d.getFullYear();
-  const startYear = d.getMonth() >= 3 ? year : year - 1;
-  return `${startYear}-${String((startYear + 1) % 100).padStart(2, '0')}`;
 }
 
 main()

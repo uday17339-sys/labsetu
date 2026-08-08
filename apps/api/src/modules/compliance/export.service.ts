@@ -17,6 +17,20 @@ import { RequestContextStore } from '../../common/context/request-context';
  *      patient:read_pii. Otherwise the export carries the lab-assigned patient
  *      code alone. An export is the easiest way for PHI to leave a building.
  */
+
+/**
+ * Column headers per dataset, used only when the query returns nothing.
+ *
+ * They must stay in step with the object literals below; toCsv derives its
+ * headers from the data whenever there is data, so a drift here can only ever
+ * affect the empty case.
+ */
+const WORKLIST_COLUMNS = ['Accession', 'Patient', 'Sex', 'Age', 'TestCode', 'TestName', 'Department', 'Analyzer', 'Status', 'Priority', 'Received', 'Due', 'Overdue', 'Reruns'] as const;
+const RESULT_COLUMNS = ['Accession', 'PatientCode', 'Sex', 'Age', 'Test', 'Department', 'Analyte', 'AnalyteName', 'Value', 'Unit', 'Reference', 'Flag', 'Critical', 'Source', 'Version', 'Collected', 'Authorized', 'Status'] as const;
+const QC_COLUMNS = ['RunAt', 'Analyte', 'AnalyteName', 'Material', 'Level', 'Lot', 'Analyzer', 'Value', 'SD', 'Status', 'ViolatedRules', 'ActionTaken', 'Resolved'] as const;
+const AUDIT_COLUMNS = ['Seq', 'OccurredAt', 'Actor', 'Role', 'IP', 'Action', 'EntityType', 'EntityId', 'Reason', 'ChangedFields', 'Hash', 'PrevHash'] as const;
+const INVENTORY_COLUMNS = ['ItemCode', 'ItemName', 'Category', 'Lot', 'Expiry', 'Expired', 'Received', 'Remaining', 'Unit', 'Status', 'Supplier', 'ReceivedAt'] as const;
+
 @Injectable()
 export class ExportService {
   constructor(
@@ -63,7 +77,7 @@ export class ExportService {
     }));
 
     await this.record('worklist', data.length, filters);
-    return toCsv(data);
+    return toCsv(data, WORKLIST_COLUMNS);
   }
 
   async results(filters: { from?: Date; to?: Date }) {
@@ -126,7 +140,7 @@ export class ExportService {
     }));
 
     await this.record('results', data.length, { ...filters, piiIncluded: canSeePii });
-    return toCsv(data);
+    return toCsv(data, RESULT_COLUMNS);
   }
 
   async qc(filters: { from?: Date; to?: Date }) {
@@ -166,7 +180,7 @@ export class ExportService {
     }));
 
     await this.record('qc', data.length, filters);
-    return toCsv(data);
+    return toCsv(data, QC_COLUMNS);
   }
 
   async auditTrail(filters: { from?: Date; to?: Date; action?: string }) {
@@ -204,7 +218,7 @@ export class ExportService {
     }));
 
     await this.record('audit', data.length, filters);
-    return toCsv(data);
+    return toCsv(data, AUDIT_COLUMNS);
   }
 
   async inventory() {
@@ -231,7 +245,7 @@ export class ExportService {
     }));
 
     await this.record('inventory', data.length, {});
-    return toCsv(data);
+    return toCsv(data, INVENTORY_COLUMNS);
   }
 
   /**
@@ -257,10 +271,17 @@ const iso = (d: Date | null | undefined) => (d ? d.toISOString() : '');
  * it Excel executes them as formulas, which is a real and well-documented
  * injection route out of an exported spreadsheet.
  */
-export function toCsv(rows: Record<string, unknown>[]): string {
-  if (rows.length === 0) return '';
-
-  const headers = Object.keys(rows[0]!);
+/**
+ * @param columns Column names to use when `rows` is empty.
+ *
+ * An export covering a quiet period is a legitimate answer, and it has to look
+ * like one. Returning a zero-byte file instead of a header row makes a
+ * correct "nothing happened" indistinguishable from a broken download — the
+ * recipient re-runs it, or worse, assumes the records were lost.
+ */
+export function toCsv(rows: Record<string, unknown>[], columns?: readonly string[]): string {
+  const headers = rows.length > 0 ? Object.keys(rows[0]!) : [...(columns ?? [])];
+  if (headers.length === 0) return '';
 
   const escape = (v: unknown): string => {
     if (v === null || v === undefined) return '';

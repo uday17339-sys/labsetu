@@ -37,6 +37,27 @@ export default async function AuditPage({
   searchParams: Promise<{ entityType?: string; entityId?: string; action?: string }>;
 }) {
   const params = await searchParams;
+  const user = await getSessionUser();
+
+  // The API refuses the data to anyone without audit:read, but the page used to
+  // swallow that 403 and render a complete, EMPTY audit trail. To a stores
+  // clerk that reads as "the lab has no history" rather than "you may not see
+  // it" — and it hides a genuine API failure behind the same empty state.
+  if (!can(user, 'audit:read')) {
+    return (
+      <div className="space-y-5">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold text-ink-900">Audit trail</h1>
+        </div>
+        <Card>
+          <EmptyState
+            title="You do not have access to the audit trail"
+            hint="Reading the audit trail requires the audit:read permission, held by the Quality Assurance and Auditor roles. Ask your administrator if you need it."
+          />
+        </Card>
+      </div>
+    );
+  }
 
   const query = new URLSearchParams({ limit: '100' });
   if (params.entityType) query.set('entityType', params.entityType);
@@ -51,7 +72,6 @@ export default async function AuditPage({
   ]);
 
   const scoped = Boolean(params.entityType && params.entityId);
-  const user = await getSessionUser();
 
   return (
     <div className="space-y-5">

@@ -1,3 +1,5 @@
+import { notFound } from 'next/navigation';
+import { isPharma } from '@/lib/vertical';
 import Link from 'next/link';
 import { apiFetch } from '@/lib/api';
 import { getSessionUser, can } from '@/lib/session';
@@ -26,6 +28,11 @@ export default async function PatientsPage({
     to?: string;
   }>;
 }) {
+  // Hidden from the nav is not the same as unreachable. On a pharma
+  // deployment this screen does not exist, so a typed URL must 404 rather
+  // than render a patient form to a manufacturing customer.
+  if (isPharma) notFound();
+
   const sp = await searchParams;
   const user = await getSessionUser();
 

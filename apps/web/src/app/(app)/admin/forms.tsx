@@ -16,7 +16,7 @@ interface Role {
  *
  * Role is a single select rather than a checkbox list: in a lab, one person
  * holds one job. Multi-role is possible through the API for the rare case, but
- * offering it here invites a receptionist being made a pathologist by accident.
+ * offering it here invites a stores clerk being made a QA approver by accident.
  */
 export function CreateUserForm({
   action,
@@ -27,15 +27,19 @@ export function CreateUserForm({
   roles: Role[];
   labs: { id: string; code: string; name: string }[];
 }) {
+  // The most common hire gets pre-selected; the tenant may not carry every
+  // template, so fall back rather than rendering an empty select.
   const [roleId, setRoleId] = useState(
-    roles.find((r) => r.code === 'LAB_TECHNICIAN')?.id ?? roles[0]?.id ?? '',
+    roles.find((r) => r.code === 'QC_ANALYST')?.id ?? roles[0]?.id ?? '',
   );
   const selected = roles.find((r) => r.id === roleId);
-  const clinical = selected && ['PATHOLOGIST', 'LAB_ADMIN'].includes(selected.code);
+  // Qualification and registration number are the signatory's details: they are
+  // printed on the CoA, so they are only asked of roles that can sign one.
+  const signatory = selected && ['QA', 'LAB_ADMIN', 'PATHOLOGIST'].includes(selected.code);
 
   return (
     <form action={action} className="space-y-3 p-4">
-      <Field label="Full name" name="fullName" required placeholder="Dr Meera Nair" />
+      <Field label="Full name" name="fullName" required placeholder="Meera Nair" />
       <Field
         label="Email"
         name="email"
@@ -86,18 +90,18 @@ export function CreateUserForm({
       <Field label="Phone" name="phone" inputMode="tel" numeric />
 
       {/* Qualification and registration number print next to the signature on
-          every authorised report, so they matter for anyone who signs. */}
-      {clinical && (
+          every released CoA, so they matter for anyone who signs one. */}
+      {signatory && (
         <div className="space-y-3 rounded-md border border-ink-200 bg-ink-50 p-3">
           <p className="text-xs text-ink-600">
-            These print beside the signature on every report this person authorises.
+            These print beside the signature on every Certificate of Analysis this person releases.
           </p>
-          <Field label="Qualification" name="qualification" placeholder="MD (Pathology)" />
+          <Field label="Qualification" name="qualification" placeholder="M.Pharm (Pharmaceutics)" />
           <Field
-            label="Medical council registration"
+            label="Professional registration"
             name="registrationNo"
             numeric
-            placeholder="KMC/12345/2015"
+            placeholder="APSPC/45821"
           />
         </div>
       )}

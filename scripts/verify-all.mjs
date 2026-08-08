@@ -25,13 +25,14 @@ const env = { ...process.env };
 if (isProd && WEB.includes('localhost')) env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const SUITES = [
-  { name: 'Clinical workflow + compliance', cmd: ['node', 'scripts/smoke-test.mjs', API], signsIn: true },
+  { name: 'Batch workflow + compliance', cmd: ['node', 'scripts/smoke-test.mjs', API], signsIn: true },
   { name: 'Gateway → API (instruments)', cmd: ['node', 'scripts/gateway-e2e.mjs', API], signsIn: true },
   { name: 'ASTM / HL7 parsers', cmd: ['npx', 'tsx', 'apps/gateway/src/parsers/parsers.verify.ts'], signsIn: false },
   { name: 'Quality control + the QC gate', cmd: ['node', 'scripts/qc-verify.mjs', API], signsIn: true },
-  { name: 'Inventory, patient history, CSV export', cmd: ['node', 'scripts/features-verify.mjs', API], signsIn: true },
-  { name: 'Billing, admin, competency, callbacks', cmd: ['node', 'scripts/admin-verify.mjs', API], signsIn: true },
+  { name: 'Consumables, lot traceability, CSV export', cmd: ['node', 'scripts/features-verify.mjs', API], signsIn: true },
+  { name: 'Stores control, admin, competency, OOS', cmd: ['node', 'scripts/admin-verify.mjs', API], signsIn: true },
   { name: 'Manufacturing QC — stores, spec, QA release', cmd: ['node', 'scripts/pharma-verify.mjs', API], signsIn: true },
+  { name: 'Head of Quality walkthrough', cmd: ['node', 'scripts/owner-walkthrough.mjs', API, WEB], signsIn: true },
   { name: 'Web UI, session, PWA, headers', cmd: ['node', 'scripts/ui-verify.mjs', WEB, API], signsIn: true },
   { name: 'Visual — real Chromium, 4 viewports', cmd: ['node', 'scripts/visual-verify.mjs', WEB, API], signsIn: true },
   { name: 'Responsive — 320px, landscape, 200% zoom, print', cmd: ['node', 'scripts/responsive-audit.mjs', WEB, API], signsIn: true },

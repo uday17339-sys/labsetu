@@ -1,43 +1,45 @@
 #!/usr/bin/env node
 /**
- * End-to-end smoke test against a running API.
+ * End-to-end smoke test — pharmaceutical manufacturing QC.
  *
- * Drives the real clinical workflow — register -> accession -> receive ->
- * result -> verify -> authorize -> report — and asserts the compliance
- * controls actually fire, rather than assuming they do:
+ * Drives the real workflow (goods receipt → sampling → results → verify →
+ * authorise → batch disposition → issue) and asserts the compliance controls
+ * actually FIRE, rather than assuming they do:
  *
- *   - a technician CANNOT authorise (RBAC)
- *   - the person who entered a result cannot authorise it (four-eyes)
+ *   - a QC analyst CANNOT authorise a result, nor release the batch they tested
  *   - authorisation without a valid signature is refused
  *   - a signature bound to stale content is refused
- *   - the audit chain verifies
+ *   - quarantined material cannot reach production
+ *   - state transitions are enforced, not merely suggested
+ *   - the audit trail carries no secrets and its hash chain verifies
+ *
+ * pharma-verify.mjs covers the stores/QA lifecycle in breadth. This suite is
+ * the controls-and-integrity pass over the same spine.
  *
  * Usage: node scripts/smoke-test.mjs [baseUrl]
  */
 const BASE = process.argv[2] ?? 'http://localhost:4000';
-const TENANT = 'SUNRISE';
+const TENANT = 'VANTAGE';
 const PASSWORD = 'LabSetu@2026';
 
 let passed = 0;
 let failed = 0;
 const failures = [];
 
-function ok(label, detail = '') {
+const ok = (l, d = '') => {
   passed++;
-  console.log(`  \x1b[32mPASS\x1b[0m  ${label}${detail ? `  \x1b[2m${detail}\x1b[0m` : ''}`);
-}
-
-function bad(label, detail = '') {
+  console.log(`  \x1b[32mPASS\x1b[0m  ${l}${d ? `  \x1b[2m${d}\x1b[0m` : ''}`);
+};
+const bad = (l, d = '') => {
   failed++;
-  failures.push(`${label}${detail ? ` — ${detail}` : ''}`);
-  console.log(`  \x1b[31mFAIL\x1b[0m  ${label}${detail ? `  \x1b[2m${detail}\x1b[0m` : ''}`);
-}
+  failures.push(`${l}${d ? ` — ${d}` : ''}`);
+  console.log(`  \x1b[31mFAIL\x1b[0m  ${l}${d ? `  \x1b[2m${d}\x1b[0m` : ''}`);
+};
+const section = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
 
-function section(title) {
-  console.log(`\n\x1b[1m${title}\x1b[0m`);
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function api(method, path, { token, body } = {}) {
+async function api(method, path, { token, body } = {}, attempt = 0) {
   const res = await fetch(`${BASE}/v1${path}`, {
     method,
     headers: {
@@ -46,6 +48,12 @@ async function api(method, path, { token, body } = {}) {
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
+  // Completing every criterion on a batch legitimately exceeds 120/min. A
+  // well-behaved client backs off rather than the server relaxing its guard.
+  if (res.status === 429 && attempt < 3) {
+    await sleep(21_000);
+    return api(method, path, { token, body }, attempt + 1);
+  }
   const text = await res.text();
   let json;
   try {
@@ -66,10 +74,11 @@ async function login(email) {
   return res.body;
 }
 
-async function main() {
-  console.log(`\n\x1b[1mLabSetu end-to-end smoke test\x1b[0m  →  ${BASE}\n`);
+const uniq = () => `${Date.now()}${Math.floor(Math.random() * 900 + 100)}`;
 
-  // ---------------------------------------------------------------- health
+async function main() {
+  console.log(`\n\x1b[1mLabSetu smoke test — pharma QC\x1b[0m  →  ${BASE}\n`);
+
   section('Infrastructure');
   const health = await fetch(`${BASE}/v1/ready`).then((r) => r.json());
   health.checks?.database === 'up'
@@ -85,502 +94,386 @@ async function main() {
     : bad('unauthenticated request rejected', `got ${unauth.status}`);
 
   const badPass = await api('POST', '/auth/login', {
-    body: { tenantCode: TENANT, email: 'admin@sunrise.test', password: 'wrong-password' },
+    body: { tenantCode: TENANT, email: 'admin@vantage.test', password: 'wrong-password' },
   });
   badPass.status === 401
     ? ok('wrong password rejected', '401')
     : bad('wrong password rejected', `got ${badPass.status}`);
 
   const badTenant = await api('POST', '/auth/login', {
-    body: { tenantCode: 'NOSUCHTENANT', email: 'admin@sunrise.test', password: PASSWORD },
+    body: { tenantCode: 'NOSUCHTENANT', email: 'admin@vantage.test', password: PASSWORD },
   });
   badTenant.status === 401
     ? ok('unknown tenant rejected', '401')
     : bad('unknown tenant rejected', `got ${badTenant.status}`);
 
-  const reception = await login('front@sunrise.test');
-  ok('front desk signed in', reception.user.fullName);
+  const admin = await login('admin@vantage.test');
+  const qa = await login('qa@vantage.test');
+  const qc = await login('qc@vantage.test');
+  const stores = await login('stores@vantage.test');
+  const auditor = await login('auditor@vantage.test');
+  ok('all plant roles signed in', 'admin · QA · QC · stores · auditor');
 
-  const tech = await login('tech@sunrise.test');
-  ok('technician signed in', tech.user.fullName);
+  // The separation that matters in a GMP lab: whoever produces a result must
+  // not be the person who releases it.
+  qc.user.permissions.includes('result:authorize')
+    ? bad('QC analyst must NOT hold result:authorize')
+    : ok('QC analyst lacks result:authorize', 'approval is a QA act');
 
-  const patho = await login('pathologist@sunrise.test');
-  ok('pathologist signed in', patho.user.fullName);
+  qa.user.permissions.includes('result:authorize')
+    ? ok('QA holds result:authorize')
+    : bad('QA holds result:authorize');
 
-  tech.user.permissions.includes('result:authorize')
-    ? bad('technician must NOT hold result:authorize')
-    : ok('technician lacks result:authorize', 'role separation intact');
+  qc.user.permissions.includes('batch:disposition')
+    ? bad('QC analyst must NOT be able to disposition a batch')
+    : ok('QC analyst cannot disposition a batch', 'that is QA');
 
-  patho.user.permissions.includes('result:authorize')
-    ? ok('pathologist holds result:authorize')
-    : bad('pathologist holds result:authorize');
+  stores.user.permissions.includes('stores:manage')
+    ? ok('stores officer can receive consignments')
+    : bad('stores can receive');
 
   // --------------------------------------------------------------- catalog
-  section('Catalog');
-  const tests = await api('GET', '/catalog/tests', { token: reception.accessToken });
-  tests.status === 200 && tests.body.length >= 8
-    ? ok('test catalog loaded', `${tests.body.length} tests`)
+  section('Catalog & specifications');
+
+  const tests = await api('GET', '/catalog/tests', { token: qc.accessToken });
+  tests.status === 200 && tests.body.length >= 10
+    ? ok('QC test catalog loaded', `${tests.body.length} tests`)
     : bad('test catalog loaded', JSON.stringify(tests.body).slice(0, 120));
 
-  const cbc = tests.body.find((t) => t.code === 'CBC');
-  const lipid = tests.body.find((t) => t.code === 'LIPID');
-  cbc && cbc.analytes.length === 12
-    ? ok('CBC has 12 analytes', cbc.analytes.map((a) => a.analyte.code).join(','))
-    : bad('CBC has 12 analytes', `got ${cbc?.analytes.length}`);
+  const assayTest = (tests.body ?? []).find((t) => t.code === 'TASSAY');
+  assayTest?.department === 'INSTRUMENTATION'
+    ? ok('tests carry pharma departments', 'Assay by HPLC → instrumentation')
+    : bad('pharma departments', `assay department = ${assayTest?.department}`);
 
-  const ldl = lipid?.analytes.find((a) => a.analyte.code === 'LDL');
-  ldl?.formula
-    ? ok('LDL is a calculated analyte', ldl.formula)
-    : bad('LDL is a calculated analyte');
+  const specs = await api('GET', '/specifications', { token: qc.accessToken });
+  const inForce = (specs.body ?? []).filter((s) => s.inForce);
+  inForce.length >= 5
+    ? ok('approved specifications in force', `${inForce.length}`)
+    : bad('specifications in force', `${inForce.length}`);
 
-  const refData = await api('GET', '/catalog/reference-data', { token: reception.accessToken });
-  refData.body.rejectionReasons?.length >= 8
-    ? ok('rejection reasons are a controlled list', `${refData.body.rejectionReasons.length} coded reasons`)
-    : bad('rejection reasons are a controlled list');
+  // ------------------------------------------------------- receive a batch
+  section('Goods receipt & sampling');
 
-  // -------------------------------------------------------------- patients
-  section('Patient registration (encrypted PII)');
+  const materials = await api('GET', '/stores/materials', { token: stores.accessToken });
+  const pcm = (materials.body ?? []).find((m) => m.code === 'API-PCM');
+  pcm ? ok('material master available', pcm.name) : bad('material master', 'API-PCM missing');
 
-  const patient = await api('POST', '/patients', {
-    token: reception.accessToken,
+  const labId = admin.user.labs[0].id;
+  const batchNumber = `SMK-${uniq()}`;
+
+  const receipt = await api('POST', '/stores/receive', {
+    token: stores.accessToken,
     body: {
-      fullName: 'Venkatesh Naidu',
-      sex: 'MALE',
-      ageYears: 47,
-      phone: '9848099887',
-      email: 'venkatesh.test@example.com',
-      consents: [
-        { purpose: 'DIAGNOSTIC_SERVICE', granted: true, noticeVersion: 'v1' },
-        { purpose: 'REPORT_DELIVERY', granted: true, noticeVersion: 'v1' },
+      labId,
+      supplierName: 'Smoke Test Supplier Pvt Ltd',
+      batches: [
+        {
+          materialId: pcm.id,
+          batchNumber,
+          quantity: 120,
+          containerCount: 6,
+          manufacturedAt: new Date(Date.now() - 15 * 864e5).toISOString().slice(0, 10),
+          expiryDate: new Date(Date.now() + 600 * 864e5).toISOString().slice(0, 10),
+        },
       ],
     },
   });
-  patient.status === 201 || patient.status === 200
-    ? ok('patient registered', patient.body.patientCode)
-    : bad('patient registered', `${patient.status} ${JSON.stringify(patient.body).slice(0, 200)}`);
+  const batchId = receipt.body?.batches?.[0]?.id;
+  batchId
+    ? ok('consignment received into quarantine', batchNumber)
+    : bad('consignment received', `${receipt.status} ${JSON.stringify(receipt.body).slice(0, 160)}`);
 
-  const patientId = patient.body.id;
-
-  // Exact-match search over the blind index, with a differently-formatted number.
-  const found = await api('GET', `/patients?phone=${encodeURIComponent('+91 98480 99887')}`, {
-    token: reception.accessToken,
+  // Quarantined material must not reach production.
+  const prematureIssue = await api('POST', `/stores/batches/${batchId}/issue`, {
+    token: stores.accessToken,
+    body: { quantity: 10, reference: 'SMOKE-PREMATURE' },
   });
-  found.body.some?.((p) => p.id === patientId)
-    ? ok('blind-index phone search matches', 'despite different formatting')
-    : bad('blind-index phone search matches', JSON.stringify(found.body).slice(0, 150));
+  prematureIssue.status === 400
+    ? ok('quarantined material cannot be issued', 'only QA-released stock leaves the store')
+    : bad('quarantine gate', `got ${prematureIssue.status}`);
 
-  // List projection must never leak identifiers.
-  const listLeak = JSON.stringify(found.body).includes('Venkatesh');
-  listLeak
-    ? bad('patient list leaks decrypted name')
-    : ok('patient list returns no decrypted identifiers');
-
-  const detail = await api('GET', `/patients/${patientId}`, { token: reception.accessToken });
-  detail.body.fullName === 'Venkatesh Naidu'
-    ? ok('identifiers decrypt correctly for an authorised reader')
-    : bad('identifiers decrypt correctly', JSON.stringify(detail.body).slice(0, 150));
-
-  // Verify at the database level that the stored value is actually ciphertext.
-  // (Checked separately by the caller; here we assert the API never echoes it.)
-
-  // ---------------------------------------------------------------- orders
-  section('Order & accessioning');
-
-  const order = await api('POST', '/orders', {
-    token: reception.accessToken,
-    body: {
-      labId: reception.user.labs[0].id,
-      patientId,
-      priority: 'ROUTINE',
-      items: [{ testDefinitionId: cbc.id }, { testDefinitionId: lipid.id }],
-      createSample: true,
-    },
+  const request = await api('POST', '/stores/sampling-requests', {
+    token: stores.accessToken,
+    body: { batchId, reason: 'RELEASE_TESTING' },
   });
-  order.status === 201 || order.status === 200
-    ? ok('order created', `${order.body.orderNumber} · invoice ${order.body.invoiceNumber}`)
-    : bad('order created', `${order.status} ${JSON.stringify(order.body).slice(0, 250)}`);
+  request.body?.id
+    ? ok('stores requests QC sampling', request.body.requestNumber)
+    : bad('sampling requested', JSON.stringify(request.body).slice(0, 140));
 
-  const samples = order.body.samples ?? [];
-  samples.length >= 1
-    ? ok('samples accessioned', samples.map((s) => s.accessionNumber).join(', '))
-    : bad('samples accessioned');
-
-  // CBC needs EDTA, lipids need serum — two different tubes, two accessions.
-  samples.length === 2
-    ? ok('separate specimen types produced separate samples', '2 tubes as clinically required')
-    : bad('separate specimen types produced separate samples', `got ${samples.length}`);
-
-  const accessionOk = samples.every((s) => /^HYD\d{6}\d{5}$/.test(s.accessionNumber));
-  accessionOk
-    ? ok('accession number format', samples[0].accessionNumber)
-    : bad('accession number format', samples.map((s) => s.accessionNumber).join(','));
-
-  // ------------------------------------------------------------- receiving
-  section('Sample receipt & result entry');
-
-  const cbcSample = await api(
-    'GET',
-    `/samples/by-accession/${samples[0].accessionNumber}`,
-    { token: tech.accessToken },
+  const storesSelfSample = await api(
+    'POST',
+    `/stores/sampling-requests/${request.body.id}/sample`,
+    { token: stores.accessToken, body: { labId, containersSampled: 3 } },
   );
-  cbcSample.status === 200
-    ? ok('barcode lookup by accession number')
-    : bad('barcode lookup', `${cbcSample.status}`);
+  storesSelfSample.status === 403
+    ? ok('stores cannot sample its own consignment', '403 — that is QC')
+    : bad('sampling separation', `got ${storesSelfSample.status}`);
 
-  // Chain of custody: collection is its own event before receipt.
-  const collected = await api('POST', `/samples/${cbcSample.body.id}/collect`, {
-    token: tech.accessToken,
-    body: { collectionSite: 'Left antecubital fossa', volumeMl: 4 },
+  const sampled = await api('POST', `/stores/sampling-requests/${request.body.id}/sample`, {
+    token: qc.accessToken,
+    body: { labId, containersSampled: 3 },
   });
-  collected.body?.status === 'COLLECTED'
-    ? ok('sample collected', 'chain of custody step recorded')
-    : bad('sample collected', JSON.stringify(collected.body).slice(0, 200));
+  const accession = sampled.body?.accessionNumber;
+  accession
+    ? ok('QC draws the sample', `AR ${accession}`)
+    : bad('sampling performed', JSON.stringify(sampled.body).slice(0, 140));
 
-  const received = await api('POST', `/samples/${cbcSample.body.id}/receive`, {
-    token: tech.accessToken,
-    body: {},
-  });
-  received.body?.status === 'IN_PROGRESS'
-    ? ok('sample received into lab', 'tests moved to IN_PROGRESS')
-    : bad('sample received', JSON.stringify(received.body).slice(0, 200));
+  const sample = await api('GET', `/samples/by-accession/${accession}`, { token: qc.accessToken });
+  const sampleTests = sample.body?.tests ?? [];
+  sampleTests.length >= 5
+    ? ok('specification produced the test set', `${sampleTests.length} tests booked`)
+    : bad('tests booked from spec', `${sampleTests.length}`);
 
-  // Entering results before receipt must be refused.
+  // -------------------------------------------------------------- results
+  section('Result entry against the specification');
 
-  const sampleTests = cbcSample.body.tests;
-  const targetTest = sampleTests[0];
-  const testDef = targetTest.testDefinition;
+  const pcmSpec = inForce.find((s) => s.material.code === 'API-PCM');
+  const specDetail = await api('GET', `/specifications/${pcmSpec.id}`, { token: qc.accessToken });
+  const limits = new Map((specDetail.body?.limits ?? []).map((l) => [l.analyte.code, l]));
 
-  // Deliberately include a critically low haemoglobin to exercise flagging.
-  const analyteByCode = Object.fromEntries(
-    testDef.analytes.map((a) => [a.analyte.code, a.analyte.id]),
-  );
+  // Mid-range for a two-sided limit, comfortably inside a one-sided one.
+  const passingValue = (code) => {
+    const l = limits.get(code);
+    if (l?.minValue != null && l?.maxValue != null) return String((l.minValue + l.maxValue) / 2);
+    if (l?.maxValue != null) return String(l.maxValue / 2);
+    if (l?.minValue != null) return String(l.minValue);
+    return 'Complies';
+  };
 
-  const values =
-    testDef.code === 'CBC'
-      ? {
-          HB: '6.2', // critical low (critical < 7.0)
-          RBC: '3.1',
-          WBC: '14200', // high
-          PLT: '210000',
-          HCT: '28.4',
-          MCV: '78.5',
-          MCH: '24.1',
-          MCHC: '30.2',
-          NEUT: '78',
-          LYMP: '15',
-          EOSI: '3',
-          MONO: '4',
-        }
-      : { CHOL: '244', TRIG: '180', HDL: '38' };
+  let entered = 0;
+  let assayTestId = null;
+  for (const t of sampleTests) {
+    const detail = await api('GET', `/tests/${t.id}`, { token: qc.accessToken });
+    const analytes = detail.body?.testDefinition?.analytes ?? [];
+    if (analytes.some((a) => a.analyte.code === 'ASSAY')) assayTestId = t.id;
 
-  const entry = await api('POST', `/tests/${targetTest.id}/results`, {
-    token: tech.accessToken,
-    body: {
-      results: Object.entries(values)
-        .filter(([code]) => analyteByCode[code])
-        .map(([code, value]) => ({ analyteId: analyteByCode[code], value })),
-    },
-  });
-  entry.body?.status === 'RESULT_ENTERED'
-    ? ok('results entered', `status ${entry.body.status}`)
-    : bad('results entered', `${entry.status} ${JSON.stringify(entry.body).slice(0, 250)}`);
+    const res = await api('POST', `/tests/${t.id}/results`, {
+      token: qc.accessToken,
+      body: {
+        results: analytes.map((a) => ({
+          analyteId: a.analyte.id,
+          value: passingValue(a.analyte.code),
+        })),
+      },
+    });
+    if (res.status === 200 || res.status === 201) entered++;
+  }
+  entered === sampleTests.length
+    ? ok('results entered for every criterion', `${entered} tests`)
+    : bad('results entered', `${entered} of ${sampleTests.length}`);
 
-  const results = entry.body.results ?? [];
-  const hb = results.find((r) => r.analyte?.code === 'HB');
-  hb?.flag === 'CRITICAL_LOW' && hb?.isCritical
-    ? ok('critical value flagged', `HB ${hb.value} → ${hb.flag}`)
-    : bad('critical value flagged', `HB flag=${hb?.flag} critical=${hb?.isCritical}`);
+  assayTestId ? ok('assay test located on the sample') : bad('assay test present');
 
-  const wbc = results.find((r) => r.analyte?.code === 'WBC');
-  wbc?.flag === 'HIGH'
-    ? ok('high value flagged against sex/age-specific range', `WBC ${wbc.value} → HIGH`)
-    : bad('high value flagged', `WBC flag=${wbc?.flag}`);
+  const afterEntry = await api('GET', `/tests/${assayTestId}`, { token: qc.accessToken });
+  afterEntry.body?.status === 'RESULT_ENTERED'
+    ? ok('test moves to RESULT_ENTERED', 'never auto-approved')
+    : bad('status after entry', afterEntry.body?.status);
 
-  const refApplied = results.every((r) => r.refDisplay !== null || r.analyte?.code === 'MONO');
-  refApplied
-    ? ok('reference ranges snapshotted onto results')
-    : ok('reference ranges snapshotted onto results', 'some analytes have no range configured');
-
-  // -------------------------------------------------- verification & RBAC
+  // --------------------------------------------- verification & signatures
   section('Verification, four-eyes and signatures');
 
-  const verified = await api('POST', `/tests/${targetTest.id}/verify`, {
-    token: tech.accessToken,
+  const verified = await api('POST', `/tests/${assayTestId}/verify`, {
+    token: qc.accessToken,
     body: {},
   });
   verified.body?.status === 'TECH_VERIFIED'
-    ? ok('technician verified the result', `status ${verified.body.status}`)
-    : bad('technician verified', JSON.stringify(verified.body).slice(0, 200));
+    ? ok('QC technically verifies the result')
+    : bad('technically verified', JSON.stringify(verified.body).slice(0, 140));
 
-  // RBAC: technician has no result:authorize permission at all.
-  const techAuth = await api('POST', `/tests/${targetTest.id}/authorize`, {
-    token: tech.accessToken,
+  const qcAuth = await api('POST', `/tests/${assayTestId}/authorize`, {
+    token: qc.accessToken,
     body: { signingToken: 'fake', meaning: 'AUTHORIZED' },
   });
-  techAuth.status === 403
-    ? ok('technician blocked from authorising', '403 — RBAC')
-    : bad('technician blocked from authorising', `got ${techAuth.status}`);
+  qcAuth.status === 403
+    ? ok('QC analyst blocked from authorising', '403 — RBAC')
+    : bad('QC blocked from authorising', `got ${qcAuth.status}`);
 
-  // Authorisation without a real signature must fail.
-  const noSig = await api('POST', `/tests/${targetTest.id}/authorize`, {
-    token: patho.accessToken,
+  const noSig = await api('POST', `/tests/${assayTestId}/authorize`, {
+    token: qa.accessToken,
     body: { signingToken: 'not-a-real-token', meaning: 'AUTHORIZED' },
   });
-  noSig.status === 401 || noSig.status === 403
+  [401, 403].includes(noSig.status)
     ? ok('authorisation refused without a valid signature', `${noSig.status}`)
-    : bad('authorisation refused without a signature', `got ${noSig.status}`);
+    : bad('signature required', `got ${noSig.status}`);
 
-  // Proper flow: fetch content hash -> re-authenticate -> signing token.
-  const hashRes = await api('GET', `/tests/${targetTest.id}/content-hash`, {
-    token: patho.accessToken,
-  });
-  const contentHash = hashRes.body.contentHash;
+  const hashRes = await api('GET', `/tests/${assayTestId}/content-hash`, { token: qa.accessToken });
+  const contentHash = hashRes.body?.contentHash;
   /^[a-f0-9]{64}$/.test(contentHash ?? '')
-    ? ok('content hash computed', contentHash.slice(0, 16) + '…')
-    : bad('content hash computed', JSON.stringify(hashRes.body).slice(0, 150));
+    ? ok('content hash computed', `${contentHash.slice(0, 16)}…`)
+    : bad('content hash', JSON.stringify(hashRes.body).slice(0, 120));
 
-  // A signing token bound to the WRONG content must be rejected.
-  const staleTokenRes = await api('POST', '/auth/signing-token', {
-    token: patho.accessToken,
+  const staleToken = await api('POST', '/auth/signing-token', {
+    token: qa.accessToken,
     body: {
       password: PASSWORD,
       entityType: 'SampleTest',
-      entityId: targetTest.id,
+      entityId: assayTestId,
       meaning: 'AUTHORIZED',
       contentHash: 'a'.repeat(64),
     },
   });
-  const staleAuth = await api('POST', `/tests/${targetTest.id}/authorize`, {
-    token: patho.accessToken,
-    body: { signingToken: staleTokenRes.body.signingToken, meaning: 'AUTHORIZED' },
+  const staleAuth = await api('POST', `/tests/${assayTestId}/authorize`, {
+    token: qa.accessToken,
+    body: { signingToken: staleToken.body?.signingToken, meaning: 'AUTHORIZED' },
   });
   staleAuth.status === 403
-    ? ok('signature bound to stale content refused', '403 — content changed since signing')
+    ? ok('signature bound to stale content refused', 'the record changed since signing')
     : bad('stale-content signature refused', `got ${staleAuth.status}`);
 
-  // Wrong password must not yield a signing token.
-  const wrongPwToken = await api('POST', '/auth/signing-token', {
-    token: patho.accessToken,
+  const wrongPw = await api('POST', '/auth/signing-token', {
+    token: qa.accessToken,
     body: {
       password: 'not-my-password',
       entityType: 'SampleTest',
-      entityId: targetTest.id,
+      entityId: assayTestId,
       meaning: 'AUTHORIZED',
       contentHash,
     },
   });
-  wrongPwToken.status === 401
+  wrongPw.status === 401
     ? ok('signing requires re-authentication', '401 on wrong password')
-    : bad('signing requires re-authentication', `got ${wrongPwToken.status}`);
+    : bad('re-authentication required', `got ${wrongPw.status}`);
 
-  const signingToken = await api('POST', '/auth/signing-token', {
-    token: patho.accessToken,
+  // Complete the batch: every criterion verified and signed.
+  let authorised = 0;
+  for (const t of sampleTests) {
+    await api('POST', `/tests/${t.id}/verify`, { token: qc.accessToken, body: {} });
+    const h = await api('GET', `/tests/${t.id}/content-hash`, { token: qa.accessToken });
+    const tok = await api('POST', '/auth/signing-token', {
+      token: qa.accessToken,
+      body: {
+        password: PASSWORD,
+        entityType: 'SampleTest',
+        entityId: t.id,
+        meaning: 'AUTHORIZED',
+        contentHash: h.body?.contentHash,
+      },
+    });
+    const r = await api('POST', `/tests/${t.id}/authorize`, {
+      token: qa.accessToken,
+      body: { signingToken: tok.body?.signingToken, meaning: 'AUTHORIZED' },
+    });
+    if (r.status === 200 || r.status === 201) authorised++;
+  }
+  authorised === sampleTests.length
+    ? ok('QA authorises every result with a signature', `${authorised} tests signed`)
+    : bad('QA authorised', `${authorised} of ${sampleTests.length}`);
+
+  // ------------------------------------------------------- QA disposition
+  section('Batch disposition & release');
+
+  const qcDisposition = await api('POST', `/qa/batches/${batchId}/disposition`, {
+    token: qc.accessToken,
+    body: { decision: 'APPROVED', rationale: 'QC attempting to release its own testing.' },
+  });
+  qcDisposition.status === 403
+    ? ok('QC cannot release the batch it tested', '403 — separation of duties')
+    : bad('disposition permissioned', `got ${qcDisposition.status}`);
+
+  const batchHash = await api('GET', `/qa/batches/${batchId}/content-hash`, {
+    token: qa.accessToken,
+  });
+  const batchTok = await api('POST', '/auth/signing-token', {
+    token: qa.accessToken,
     body: {
       password: PASSWORD,
-      entityType: 'SampleTest',
-      entityId: targetTest.id,
-      meaning: 'AUTHORIZED',
-      contentHash,
+      entityType: 'MaterialBatch',
+      entityId: batchId,
+      meaning: 'APPROVED',
+      contentHash: batchHash.body?.contentHash,
     },
   });
-  signingToken.body.signingToken
-    ? ok('signing token issued after re-authentication', `expires in ${signingToken.body.expiresIn}s`)
-    : bad('signing token issued', JSON.stringify(signingToken.body).slice(0, 200));
-
-  const authorized = await api('POST', `/tests/${targetTest.id}/authorize`, {
-    token: patho.accessToken,
-    body: { signingToken: signingToken.body.signingToken, meaning: 'AUTHORIZED' },
-  });
-  authorized.body?.status === 'AUTHORIZED'
-    ? ok('pathologist authorised with a valid signature', 'AUTHORIZED')
-    : bad('pathologist authorised', `${authorized.status} ${JSON.stringify(authorized.body).slice(0, 250)}`);
-
-  // --------------------------------------------------------------- reports
-  section('Report generation & release');
-
-  const report = await api('POST', '/reports', {
-    token: patho.accessToken,
-    body: { orderId: order.body.id, isPartial: true },
-  });
-  report.body?.reportNumber
-    ? ok('report generated', `${report.body.reportNumber} v${report.body.version}`)
-    : bad('report generated', `${report.status} ${JSON.stringify(report.body).slice(0, 250)}`);
-
-  const reportId = report.body.id;
-  const rptHash = await api('GET', `/reports/${reportId}/content-hash`, {
-    token: patho.accessToken,
-  });
-  const rptToken = await api('POST', '/auth/signing-token', {
-    token: patho.accessToken,
+  const released = await api('POST', `/qa/batches/${batchId}/disposition`, {
+    token: qa.accessToken,
     body: {
-      password: PASSWORD,
-      entityType: 'Report',
-      entityId: reportId,
-      meaning: 'AUTHORIZED',
-      contentHash: rptHash.body.contentHash,
+      decision: 'APPROVED',
+      rationale:
+        'All acceptance criteria met against the specification in force. Reviewed against the ' +
+        'supplier certificate and in-house testing. Released for manufacturing use.',
+      signingToken: batchTok.body?.signingToken,
     },
   });
+  released.body?.status === 'APPROVED'
+    ? ok('QA releases the batch, signed', batchNumber)
+    : bad('batch released', `${released.status} ${JSON.stringify(released.body).slice(0, 160)}`);
 
-  const released = await api('POST', `/reports/${reportId}/release`, {
-    token: patho.accessToken,
-    body: {
-      signingToken: rptToken.body.signingToken,
-      deliverTo: [{ channel: 'WHATSAPP' }, { channel: 'EMAIL' }],
-    },
+  const issued = await api('POST', `/stores/batches/${batchId}/issue`, {
+    token: stores.accessToken,
+    body: { quantity: 20, reference: 'BMR/SMOKE/001' },
   });
-  released.body?.status === 'RELEASED'
-    ? ok('report released', `${released.body.reportNumber}`)
-    : bad('report released', `${released.status} ${JSON.stringify(released.body).slice(0, 250)}`);
+  issued.status === 200 || issued.status === 201
+    ? ok('and only now can stores issue it to production', '20 kg')
+    : bad('material issued after release', JSON.stringify(issued.body).slice(0, 140));
 
-  released.body?.signatures?.length >= 2
-    ? ok('report carries signatures', `${released.body.signatures.length} (test + report)`)
-    : bad('report carries signatures', `${released.body?.signatures?.length}`);
-
-  const delivered = released.body?.deliveries ?? [];
-  delivered.length === 2 && delivered.every((d) => d.status === 'QUEUED')
-    ? ok('delivery queued with consent on record', delivered.map((d) => d.channel).join(', '))
-    : bad('delivery queued', JSON.stringify(delivered));
-
-  const reportPatientName = released.body?.patient?.name;
-  reportPatientName === 'Venkatesh Naidu'
-    ? ok('report renders the decrypted patient name')
-    : bad('report renders patient name', `got ${reportPatientName}`);
-
-  // ------------------------------------------------------------ compliance
+  // ------------------------------------------------------------------ audit
   section('Audit trail & chain integrity');
 
-  const history = await api(
-    'GET',
-    `/compliance/audit/SampleTest/${targetTest.id}`,
-    { token: patho.accessToken },
-  );
+  const history = await api('GET', `/compliance/audit/SampleTest/${assayTestId}`, {
+    token: auditor.accessToken,
+  });
   const actions = (history.body ?? []).map((h) => h.action);
-  actions.includes('UPDATE') && actions.includes('VERIFY') && actions.includes('AUTHORIZE')
-    ? ok('full history recorded for the test', actions.join(' → '))
-    : bad('full history recorded', JSON.stringify(actions));
+  actions.includes('VERIFY') && actions.includes('AUTHORIZE')
+    ? ok('full history recorded for the test', [...new Set(actions)].join(' → '))
+    : bad('history recorded', JSON.stringify(actions));
 
   const authEntry = (history.body ?? []).find((h) => h.action === 'AUTHORIZE');
   authEntry?.actor && authEntry?.actorRole
     ? ok('audit entry is attributable', `${authEntry.actor} (${authEntry.actorRole})`)
-    : bad('audit entry attributable', JSON.stringify(authEntry).slice(0, 150));
+    : bad('attributable', JSON.stringify(authEntry ?? {}).slice(0, 120));
 
-  // audit:verify belongs to the AUDITOR role, not the pathologist — using the
-  // right account here also exercises the read-only compliance role.
-  const auditor = await login('auditor@sunrise.test');
-  const chain = await api('GET', '/compliance/audit-chain/verify', {
-    token: auditor.accessToken,
-  });
+  const chain = await api('GET', '/compliance/audit-chain/verify', { token: auditor.accessToken });
   chain.body?.status === 'PASSED'
-    ? ok('audit chain verified', `${chain.body.entriesChecked} entries, head seq ${chain.body.headSeq}`)
-    : bad('audit chain verified', JSON.stringify(chain.body).slice(0, 250));
+    ? ok('audit chain verified', `${chain.body.entriesChecked} entries`)
+    : bad('chain verified', JSON.stringify(chain.body).slice(0, 160));
 
-  const auditSearch = await api('GET', '/compliance/audit?limit=200', {
-    token: auditor.accessToken,
-  });
-  const leaks = JSON.stringify(auditSearch.body).match(/Venkatesh|LabSetu@2026|9848099887/g);
+  const search = await api('GET', '/compliance/audit?limit=200', { token: auditor.accessToken });
+  const leaks = JSON.stringify(search.body).match(/LabSetu@2026|not-my-password/g);
   leaks
-    ? bad('audit trail leaks PII or secrets', [...new Set(leaks)].join(','))
-    : ok('audit trail contains no PII or secrets');
+    ? bad('audit trail leaks secrets', [...new Set(leaks)].join(','))
+    : ok('audit trail contains no secrets');
 
-  const loginFailures = (auditSearch.body.items ?? []).filter(
-    (e) => e.action === 'LOGIN_FAILURE',
-  );
+  const loginFailures = (search.body.items ?? []).filter((e) => e.action === 'LOGIN_FAILURE');
   loginFailures.length >= 1
     ? ok('failed sign-ins recorded', `${loginFailures.length} entries`)
     : bad('failed sign-ins recorded', 'expected at least one');
 
-  const auditorWrite = await api('POST', '/patients', {
+  const auditorWrite = await api('POST', '/stores/sampling-requests', {
     token: auditor.accessToken,
-    body: { fullName: 'Should Not Exist', sex: 'MALE', ageYears: 30 },
+    body: { batchId, reason: 'RELEASE_TESTING' },
   });
   auditorWrite.status === 403
-    ? ok('auditor is read-only', '403 on write attempt')
-    : bad('auditor is read-only', `got ${auditorWrite.status}`);
+    ? ok('auditor is read-only', '403 on write')
+    : bad('auditor read-only', `got ${auditorWrite.status}`);
 
-  const indicators = await api('GET', '/compliance/quality-indicators', {
-    token: auditor.accessToken,
-  });
-  indicators.body?.sampleRejectionRate
-    ? ok(
-        'NABL quality indicators computed',
-        `rejection ${indicators.body.sampleRejectionRate.value}% · TAT breach ${indicators.body.tatBreachRate.value}%`,
-      )
-    : bad('quality indicators computed', JSON.stringify(indicators.body).slice(0, 150));
-
-  // ----------------------------------------------------------------- rerun
-  section('Re-run supersedes rather than deletes');
-
-  const secondSample = await api(
-    'GET',
-    `/samples/by-accession/${samples[1].accessionNumber}`,
-    { token: tech.accessToken },
-  );
-  await api('POST', `/samples/${secondSample.body.id}/collect`, {
-    token: tech.accessToken,
-    body: {},
-  });
-  await api('POST', `/samples/${secondSample.body.id}/receive`, {
-    token: tech.accessToken,
-    body: {},
-  });
-  const lipidTest = secondSample.body.tests[0];
-  const lipidAnalytes = Object.fromEntries(
-    lipidTest.testDefinition.analytes.map((a) => [a.analyte.code, a.analyte.id]),
-  );
-
-  await api('POST', `/tests/${lipidTest.id}/results`, {
-    token: tech.accessToken,
-    body: {
-      results: [
-        { analyteId: lipidAnalytes.CHOL, value: '244' },
-        { analyteId: lipidAnalytes.TRIG, value: '180' },
-        { analyteId: lipidAnalytes.HDL, value: '38' },
-      ],
-    },
-  });
-
-  const afterCalc = await api('GET', `/tests/${lipidTest.id}`, { token: tech.accessToken });
-  const ldlResult = afterCalc.body.results?.find((r) => r.analyte?.code === 'LDL');
-  // Friedewald: 244 - 38 - (180/5) = 170
-  Number(ldlResult?.value) === 170
-    ? ok('calculated analyte evaluated', `LDL = ${ldlResult.value} (Friedewald)`)
-    : bad('calculated analyte evaluated', `LDL = ${ldlResult?.value}, expected 170`);
-
-  ldlResult?.source === 'CALCULATED'
-    ? ok('calculated result marked with its provenance', 'source=CALCULATED')
-    : bad('calculated provenance', `source=${ldlResult?.source}`);
-
-  const rerun = await api('POST', `/tests/${lipidTest.id}/rerun`, {
-    token: tech.accessToken,
-    body: { reason: 'Lipaemic sample suspected, repeating after ultracentrifugation' },
-  });
-  rerun.body?.status === 'IN_PROGRESS'
-    ? ok('re-run accepted with documented reason', `rerunCount ${rerun.body.rerunCount}`)
-    : bad('re-run accepted', JSON.stringify(rerun.body).slice(0, 200));
-
-  // ------------------------------------------------------------- state m/c
+  // ----------------------------------------------- state machine enforcement
   section('State machine enforcement');
 
-  const badTransition = await api('POST', `/tests/${lipidTest.id}/verify`, {
-    token: tech.accessToken,
+  const reVerify = await api('POST', `/tests/${assayTestId}/verify`, {
+    token: qc.accessToken,
     body: {},
   });
-  badTransition.status === 400
-    ? ok('invalid state transition rejected', 'IN_PROGRESS → TECH_VERIFIED refused')
-    : bad('invalid transition rejected', `got ${badTransition.status}`);
+  reVerify.status === 400
+    ? ok('invalid state transition rejected', 'AUTHORIZED → TECH_VERIFIED refused')
+    : bad('invalid transition rejected', `got ${reVerify.status}`);
 
-  const doubleReceive = await api('POST', `/samples/${cbcSample.body.id}/receive`, {
-    token: tech.accessToken,
-    body: {},
+  const reDisposition = await api('POST', `/qa/batches/${batchId}/disposition`, {
+    token: qa.accessToken,
+    body: {
+      decision: 'REJECTED',
+      rationale: 'Attempting to re-disposition an already released batch without a signature.',
+    },
   });
-  doubleReceive.status === 400
-    ? ok('duplicate receipt rejected', 'terminal/invalid transition refused')
-    : bad('duplicate receipt rejected', `got ${doubleReceive.status}`);
+  // 422 is the correct refusal here: the request carries no signing token, and
+  // reversing a release is exactly the act that must be signed. Accepting only
+  // 400/403/409 was the assertion being narrower than the guard.
+  [400, 403, 409, 422].includes(reDisposition.status)
+    ? ok(
+        'a released batch cannot be re-dispositioned without a signature',
+        `${reDisposition.status}`,
+      )
+    : bad('re-disposition guarded', `got ${reDisposition.status}`);
 
-  // ------------------------------------------------------------------ done
-  console.log(
-    `\n\x1b[1m${passed} passed, ${failed} failed\x1b[0m\n`,
-  );
+  console.log(`\n\x1b[1m${passed} passed, ${failed} failed\x1b[0m\n`);
   if (failures.length) {
     console.log('\x1b[31mFailures:\x1b[0m');
     for (const f of failures) console.log(`  - ${f}`);

@@ -221,8 +221,8 @@ export default async function SampleDetailPage({ params }: { params: Promise<{ i
         </Card>
       )}
 
-      <div className="grid gap-5 lg:grid-cols-3">
-        <Card className="lg:col-span-2" title="Tests on this sample">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-3">
+        <Card className="min-w-0 lg:col-span-2" title="Tests on this sample">
           {sample.tests.length === 0 ? (
             <EmptyState title="No tests" />
           ) : (

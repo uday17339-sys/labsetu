@@ -94,9 +94,9 @@ export default async function ReportPage({ params }: { params: Promise<{ id: str
         </div>
       </div>
 
-      <div className="grid gap-5 lg:grid-cols-3">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5 lg:grid-cols-3">
         {/* The report as the patient receives it. */}
-        <div className="lg:col-span-2">
+        <div className="min-w-0 lg:col-span-2">
           <Card className="print:border-0">
             <div className="border-b-2 border-ink-900 px-6 py-4">
               <div className="flex items-start justify-between">

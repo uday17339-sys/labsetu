@@ -81,14 +81,23 @@ export function ResultEntryForm({
         {analytes.map((a) => (
           <li
             key={a.id}
-            className="px-4 py-3 sm:grid sm:grid-cols-[1fr_11rem_5rem_9rem] sm:items-center sm:gap-3 sm:py-2"
+            className="min-w-0 px-4 py-3 sm:grid sm:grid-cols-[minmax(0,1fr)_11rem_5rem_9rem] sm:items-center sm:gap-3 sm:py-2"
           >
-            <label htmlFor={`value:${a.id}`} className="block">
+            <label htmlFor={`value:${a.id}`} className="block min-w-0">
               <span className="block font-medium text-ink-900">{a.name}</span>
               <span className="block text-xs text-ink-400">{a.code}</span>
             </label>
 
-            <div className="mt-1.5 sm:mt-0">
+            {/*
+              min-w-0 on the wrapper AND the select.
+
+              A <select> takes its intrinsic width from its LONGEST option, and
+              min-width:auto stops it shrinking below that. A pharmacopoeial
+              description like "White to off-white crystalline powder" made the
+              control 449px wide and pushed a 320px page 175px sideways. With
+              min-w-0 it fills the column it is given and truncates instead.
+            */}
+            <div className="mt-1.5 min-w-0 sm:mt-0">
               {a.valueType === 'QUALITATIVE' && a.allowedValues.length > 0 ? (
                 <select
                   id={`value:${a.id}`}
@@ -96,7 +105,7 @@ export function ResultEntryForm({
                   defaultValue={existing[a.id] ?? ''}
                   disabled={readOnly}
                   // h-11 on mobile: a 44px touch target.
-                  className="h-11 w-full rounded-md border border-ink-300 px-2 text-sm disabled:bg-ink-50 sm:h-9"
+                  className="h-11 w-full min-w-0 rounded-md border border-ink-300 px-2 text-sm disabled:bg-ink-50 sm:h-9"
                 >
                   <option value="">—</option>
                   {a.allowedValues.map((v) => (

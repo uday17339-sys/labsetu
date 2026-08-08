@@ -3,6 +3,13 @@
 Sequenced against the report's recommendations: one beachhead vertical, a short instrument
 list, services-inclusive delivery, and pilots as the trust asset.
 
+> **Vertical update.** The product now ships as pharmaceutical manufacturing QC — stores,
+> specifications, batch release and the Certificate of Analysis. The clinical workflow below
+> was built first and still underpins the shared spine (sample → test → result → verify →
+> authorise); on a pharma deployment a batch replaces the patient as the subject of the
+> sample. Phase items written for a diagnostics pilot read accordingly: "lab" is a plant, and
+> the NABL assessor is a CDSCO/Schedule M or customer-audit equivalent.
+
 ---
 
 ## Phase 0 — Foundation ✅ *(this scaffold)*

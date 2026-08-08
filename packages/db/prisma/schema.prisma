@@ -607,6 +607,16 @@ model TestDefinition {
 }
 
 enum LabDepartment {
+  // --- pharmaceutical QC ---
+  // A pharma QC lab is organised by technique, not by clinical discipline.
+  // Labelling an Assay-by-HPLC test "biochemistry" reads as wrong to anyone
+  // from manufacturing.
+  CHEMICAL
+  INSTRUMENTATION
+  PACKAGING_DEVELOPMENT
+  STABILITY
+
+  // --- clinical diagnostics ---
   BIOCHEMISTRY
   HAEMATOLOGY
   MICROBIOLOGY

@@ -10,6 +10,14 @@
  * Deliberately leaves the demo mid-flow: one batch quarantined awaiting
  * sampling, one under test. An empty stores screen demonstrates nothing.
  *
+ * SUPERSEDED. This script dates from when manufacturing QC was an overlay on a
+ * diagnostics seed. The primary seed (packages/db/prisma/seed.ts) now creates a
+ * complete pharmaceutical manufacturer, so running this on top of it duplicates
+ * materials and specifications onto a database that is already correct.
+ *
+ * It is kept only for a legacy tenant that predates that change, and refuses to
+ * run against a tenant already provisioned as PHARMA_MANUFACTURING.
+ *
  * Usage: node packages/db/scripts/seed-pharma.mjs
  */
 import { PrismaClient } from '@prisma/client';
@@ -127,6 +135,15 @@ try {
     await prisma.$transaction(
       async (tx) => {
         await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenant.id}, true)`;
+
+        // Refuse a tenant the primary seed already provisioned for pharma.
+        const vertical = await tx.tenantPolicy.findFirst({
+          where: { key: 'tenant.vertical' },
+        });
+        if (vertical?.value === 'PHARMA_MANUFACTURING') {
+          console.log('  already a manufacturing tenant — skipped (seeded by prisma/seed.ts)');
+          return;
+        }
 
         const lab = await tx.lab.findFirst({ orderBy: { createdAt: 'asc' } });
         if (!lab) {

@@ -3,7 +3,7 @@
  * Quality control verification.
  *
  * Proves the compliance claim in COMPLIANCE.md §6 end to end: a failed QC run
- * actually BLOCKS authorisation of patient results on that analyzer, and the
+ * actually BLOCKS authorisation of batch results on that analyzer, and the
  * block clears only with a documented, audited corrective action.
  *
  * That claim was previously unverifiable — the gate existed but nothing could
@@ -14,7 +14,7 @@
 import { createHmac, createHash, randomUUID } from 'node:crypto';
 
 const API = process.argv[2] ?? 'http://localhost:4000';
-const TENANT = 'SUNRISE';
+const TENANT = 'VANTAGE';
 const PASSWORD = 'LabSetu@2026';
 
 let pass = 0;
@@ -100,10 +100,10 @@ const login = (email) =>
 async function main() {
   console.log(`\n\x1b[1mLabSetu QC verification\x1b[0m  →  ${API}\n`);
 
-  const tech = await login('tech@sunrise.test');
-  const patho = await login('pathologist@sunrise.test');
-  const admin = await login('admin@sunrise.test');
-  const auditor = await login('auditor@sunrise.test');
+  const tech = await login('qc@vantage.test');
+  const patho = await login('qa@vantage.test');
+  const admin = await login('admin@vantage.test');
+  const auditor = await login('auditor@vantage.test');
 
   // ------------------------------------------------------------------ setup
   section('QC configuration');
@@ -119,7 +119,7 @@ async function main() {
   // unrelated analyte and the gate correctly did not fire — which read as a
   // broken gate when the gate was right and the test was wrong.
   const lot =
-    lots.body.find((l) => (l.analytes ?? []).some((a) => a.analyte.code === 'GLUF')) ??
+    lots.body.find((l) => (l.analytes ?? []).some((a) => a.analyte.code === 'ASSAY')) ??
     lots.body[0];
   const targets = lot.analytes ?? [];
   targets.length > 0
@@ -130,7 +130,7 @@ async function main() {
   const chemDeviceId = (refData.body.devices ?? []).find((d) => d.code === 'CHEM-01')?.id;
   chemDeviceId ? ok('analyzer available for gating', 'CHEM-01') : bad('CHEM-01 not found');
 
-  const target = targets.find((t) => t.analyte.code === 'GLUF') ?? targets[0];
+  const target = targets.find((t) => t.analyte.code === 'ASSAY') ?? targets[0];
   const mean = Number(target.targetMean);
   const sd = Number(target.targetSd);
   ok('target loaded', `${target.analyte.code}: ${mean} ± ${sd}`);
@@ -232,7 +232,7 @@ async function main() {
     : bad('10-x drift detection', JSON.stringify(drift?.body).slice(0, 160));
 
   // ------------------------------------------------------ the actual gate
-  section('The gate: does a QC failure block patient results?');
+  section('The gate: does a QC failure block batch results?');
 
   const failures0 = await api('GET', '/qc/failures', { token: tech.accessToken });
   const open = (failures0.body ?? []).filter((f) => f.analyte === target.analyte.code);
@@ -245,9 +245,9 @@ async function main() {
   //
   // The gate only applies to a test that HAS an analyzer, and a test acquires
   // one when its result arrives from an instrument. So this walks the real
-  // path: order -> receive -> analyzer result -> verify -> failing QC on that
-  // same analyzer -> attempt to authorise.
-  const reception = await login('front@sunrise.test');
+  // path: goods receipt -> sampling -> analyzer result -> verify -> failing QC
+  // on that same analyzer -> attempt to authorise.
+  const stores = await login('stores@vantage.test');
 
   const enrolCode = await api('POST', `/ingest/devices/${chemDeviceId}/enrolment-code`, {
     token: admin.accessToken,
@@ -258,29 +258,41 @@ async function main() {
     })
   ).body;
 
-  const catalog = await api('GET', '/catalog/tests', { token: reception.accessToken });
-  const gluTest = catalog.body.find((t) => t.code === 'GLUF');
+  const labId = stores.user.labs[0].id;
+  const materials = await api('GET', '/stores/materials', { token: stores.accessToken });
+  const material = (materials.body ?? []).find((m) => m.code === 'API-PCM');
 
-  const patient = await api('POST', '/patients', {
-    token: reception.accessToken,
-    body: { fullName: 'QC Gate Patient', sex: 'MALE', ageYears: 50, phone: '9848007777' },
-  });
-  const order = await api('POST', '/orders', {
-    token: reception.accessToken,
+  const receipt = await api('POST', '/stores/receive', {
+    token: stores.accessToken,
     body: {
-      labId: reception.user.labs[0].id,
-      patientId: patient.body.id,
-      items: [{ testDefinitionId: gluTest.id }],
-      createSample: true,
+      labId,
+      supplierName: 'QC Gate Supplier',
+      batches: [
+        {
+          materialId: material.id,
+          batchNumber: `QCG-${Date.now()}`,
+          quantity: 50,
+          containerCount: 2,
+          manufacturedAt: new Date(Date.now() - 10 * 864e5).toISOString().slice(0, 10),
+          expiryDate: new Date(Date.now() + 500 * 864e5).toISOString().slice(0, 10),
+        },
+      ],
     },
   });
-  const accession = order.body.samples[0].accessionNumber;
+
+  const req = await api('POST', '/stores/sampling-requests', {
+    token: stores.accessToken,
+    body: { batchId: receipt.body.batches[0].id, reason: 'RELEASE_TESTING' },
+  });
+  const sampled = await api('POST', `/stores/sampling-requests/${req.body.id}/sample`, {
+    token: tech.accessToken,
+    body: { labId, containersSampled: 2 },
+  });
+  const accession = sampled.body.accessionNumber;
 
   const sample = await api('GET', `/samples/by-accession/${accession}`, {
     token: tech.accessToken,
   });
-  await api('POST', `/samples/${sample.body.id}/collect`, { token: tech.accessToken, body: {} });
-  await api('POST', `/samples/${sample.body.id}/receive`, { token: tech.accessToken, body: {} });
 
   // Result from the analyzer — this is what stamps deviceId onto the test.
   const envelope = {
@@ -292,9 +304,11 @@ async function main() {
     observations: [
       {
         specimenRef: accession,
-        testCode: 'GLU',
-        value: '96',
-        units: 'mg/dL',
+        testCode: 'ASSAY',
+        // Comfortably inside the 98.0–102.0 % specification, so the ONLY thing
+        // that can block authorisation later is the failed control.
+        value: '99.60',
+        units: '%',
         resultStatus: 'FINAL',
         rerunCount: 0,
         isQc: false,
@@ -307,7 +321,20 @@ async function main() {
     ? ok('analyzer result captured onto the test', 'stamps the analyzer on the record')
     : bad('analyzer result captured', `${ingested.status}`);
 
-  const testId = sample.body.tests[0].id;
+  // The specification books several tests against the batch. Only the HPLC
+  // assay is bound to CHEM-01, and only that one is gated by this control —
+  // taking tests[0] would land on Description and the gate would (correctly)
+  // never fire.
+  let testId = null;
+  for (const t of sample.body.tests ?? []) {
+    const d = await api('GET', `/tests/${t.id}`, { token: tech.accessToken });
+    if (d.body?.testDefinition?.code === 'TASSAY') {
+      testId = t.id;
+      break;
+    }
+  }
+  testId ? ok('assay test located on the batch', 'TASSAY') : bad('assay test located');
+
   await api('POST', `/tests/${testId}/verify`, { token: tech.accessToken, body: {} });
 
   const withDevice = await api('GET', `/tests/${testId}`, { token: patho.accessToken });

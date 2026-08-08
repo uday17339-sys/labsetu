@@ -13,15 +13,22 @@
 
 | Framework | Applies to | Phase | What it demands of us |
 |---|---|---|---|
-| **NABL 112 / ISO 15189** | Medical (diagnostic) labs | **v1 — beachhead** | Sample identification & traceability, competency of personnel, QC, TAT monitoring, result verification/authorisation, amended-report handling, records retention |
-| **NABL 113 / ISO 17025** | Testing & calibration labs | v1.5 | Same spine, method validation and measurement-uncertainty emphasis |
-| **DPDP Act, 2023** | Any lab handling personal data | **v1 — mandatory** | Consent, purpose limitation, retention limits, breach notification, data-principal rights, security safeguards |
-| **CDSCO revised Schedule M** | Pharma manufacturing QC | Phase two | Computerised system validation, PQS, QRM, Product Quality Review |
-| **US FDA 21 CFR Part 11 / EU Annex 11** | Indian pharma *exporters* | Phase two | Audit trails, e-signatures, system validation. Relevant because export customers audit against it |
+| **CDSCO revised Schedule M** | Pharma manufacturing QC | **v1 — shipped vertical** | Computerised system validation, PQS, QRM, Product Quality Review, raw-material control, batch release |
+| **US FDA 21 CFR Part 11 / EU Annex 11** | Indian pharma *exporters* | **v1 — shipped** | Audit trails, e-signatures, system validation. Relevant because export customers audit against it |
+| **DPDP Act, 2023** | Any organisation handling personal data | **v1 — mandatory** | Consent, purpose limitation, retention limits, breach notification, data-principal rights, security safeguards. Applies to staff records even where no patient data exists |
+| **NABL 112 / ISO 15189** | Medical (diagnostic) labs | Built, not the shipped vertical | Sample identification & traceability, competency of personnel, QC, TAT monitoring, result verification/authorisation, amended-report handling, records retention |
+| **NABL 113 / ISO 17025** | Testing & calibration labs | Adjacent | Same spine, method validation and measurement-uncertainty emphasis |
 
-**v1 targets ISO 15189/NABL 112 and DPDP.** Part 11 / Annex 11 controls are nonetheless built
-into the foundation now — audit trail, e-signature, access control — because retrofitting
-them after a year of production data is significantly harder than building them in.
+**v1 ships as pharmaceutical manufacturing QC**, so Part 11 / Annex 11 and revised Schedule M
+are the governing frameworks: the audit trail, electronic signature, four-eyes authorisation
+and batch-release gate all exist to satisfy them.
+
+The diagnostics controls in this document are not aspirational — they are built and tested,
+and the platform was developed against ISO 15189 first. They remain in the codebase behind
+`APP_VERTICAL`, which is why sections below still discuss patients and reports. On a pharma
+deployment those surfaces are not provisioned: the tenant is created with manufacturing roles
+only, and patient registration, billing and the clinical report register are absent from the
+product a plant sees.
 
 ---
 

@@ -79,7 +79,9 @@ const ICONS: Record<string, React.ReactNode> = {
 function Icon({ name }: { name: string }) {
   return (
     <svg
-      className="h-5 w-5"
+      // shrink-0: once the tab is allowed to shrink (min-w-0), the icon would
+      // otherwise be squashed before the text truncates.
+      className="h-5 w-5 shrink-0"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -109,13 +111,19 @@ export function BottomNavLink({
     <Link
       href={href}
       aria-current={active ? 'page' : undefined}
-      // min-h-14 keeps every tab a comfortable touch target.
-      className={`flex min-h-14 flex-1 flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium transition ${
+      // min-h-14 keeps the touch target comfortable vertically.
+      //
+      // min-w-0 is what lets flex-1 actually shrink. A flex item defaults to
+      // min-width:auto, so it will not go narrower than its content — six tabs
+      // held themselves at ~83px each and pushed the whole document 175px wide
+      // on a 320px phone. With min-w-0 they divide the space they have, and the
+      // label truncates rather than the page scrolling sideways.
+      className={`flex min-h-14 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 py-2 text-[11px] font-medium transition ${
         active ? 'text-brand-600' : 'text-ink-500'
       }`}
     >
       <Icon name={icon} />
-      {label}
+      <span className="w-full truncate text-center">{label}</span>
     </Link>
   );
 }
@@ -224,7 +232,7 @@ export function MoreTab({ items }: { items: NavItem[] }) {
         type="button"
         onClick={() => setOpen(true)}
         aria-expanded={open}
-        className={`flex min-h-14 flex-1 flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium transition ${
+        className={`flex min-h-14 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium transition ${
           anyActive ? 'text-brand-600' : 'text-ink-500'
         }`}
       >

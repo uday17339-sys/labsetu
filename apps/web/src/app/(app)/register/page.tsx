@@ -1,4 +1,5 @@
-import { redirect } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
+import { isPharma } from '@/lib/vertical';
 import { apiFetch, ApiError } from '@/lib/api';
 import { getSessionUser } from '@/lib/session';
 import { Card, ErrorBanner } from '@/components/ui';
@@ -102,6 +103,11 @@ export default async function RegisterPage({
 }: {
   searchParams: Promise<{ error?: string }>;
 }) {
+  // Hidden from the nav is not the same as unreachable. On a pharma
+  // deployment this screen does not exist, so a typed URL must 404 rather
+  // than render a patient form to a manufacturing customer.
+  if (isPharma) notFound();
+
   const params = await searchParams;
   const user = await getSessionUser();
 

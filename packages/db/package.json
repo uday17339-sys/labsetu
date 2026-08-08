@@ -24,7 +24,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "sync-roles": "dotenv -e ../../.env -- node scripts/sync-roles.mjs",
-    "seed-inventory": "dotenv -e ../../.env -- node scripts/seed-inventory.mjs"
+    "seed-inventory": "dotenv -e ../../.env -- node scripts/seed-inventory.mjs",
+    "seed-pharma": "dotenv -e ../../.env -- tsx prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.2.1"
