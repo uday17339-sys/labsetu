@@ -209,10 +209,18 @@ export class StoresService {
             // Retest date is derived from the material's own period where the
             // supplier has not given one. A batch with neither is flagged on
             // the stores screen rather than silently treated as forever-valid.
-            const retestDate =
+            //
+            // Capped at expiry, because a retest date beyond it is a date that
+            // can never arrive: the material is already unusable. A three-year
+            // retest period on a consignment shipped with eighteen months of
+            // shelf life left produced exactly that, and the stores screen then
+            // showed a retest due a year after the batch had expired.
+            const derived =
               material.retestPeriodDays && b.manufacturedAt
                 ? new Date(b.manufacturedAt.getTime() + material.retestPeriodDays * 864e5)
                 : null;
+            const retestDate =
+              derived && b.expiryDate && derived > b.expiryDate ? b.expiryDate : derived;
 
             return {
               tenantId: ctx.tenantId!,

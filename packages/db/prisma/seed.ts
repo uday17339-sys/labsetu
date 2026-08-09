@@ -435,33 +435,60 @@ async function main() {
       console.log(`    tests        ${tests.size}`);
 
       // ------------------------------------------------------------ competency
+      //
+      // Deliberately NOT a uniform block. A real competency matrix has holes in
+      // it, and the holes are the point: they are what the authorisation gate
+      // enforces. Priya joined this year and is signed off on the physical and
+      // wet-chemistry methods but not yet on microbiology or dissolution, so
+      // the matrix screen shows a genuine gap rather than a wall of green.
+      //
+      // Assessment dates are staggered too. Everyone qualifying on the same day
+      // and expiring on the same day is the signature of a bulk import, and it
+      // is the first thing an assessor asks to see the records behind.
+      const MICRO_AND_SPECIALIST = new Set(['TMLT', 'TDISS']);
+
       const competency: Prisma.UserCompetencyCreateManyInput[] = [];
-      for (const testId of tests.values()) {
-        for (const [userId, level] of [
-          [analyst.id, 'PERFORM'],
-          [analyst.id, 'VERIFY'],
-          [analyst2.id, 'PERFORM'],
-          [qa.id, 'AUTHORIZE'],
-          [qa.id, 'VERIFY'],
-          [qa2.id, 'AUTHORIZE'],
-        ] as const) {
+      for (const [code, testId] of tests.entries()) {
+        const junior = !MICRO_AND_SPECIALIST.has(code);
+
+        const grants: [string, string, string, string][] = [
+          // [userId, level, validFrom, validUntil]
+          [analyst.id, 'PERFORM', '2024-04-15', '2027-04-14'],
+          [analyst.id, 'VERIFY', '2025-06-02', '2027-06-01'],
+          [qa.id, 'VERIFY', '2023-11-20', '2027-11-19'],
+          [qa.id, 'AUTHORIZE', '2023-11-20', '2027-11-19'],
+          [qa2.id, 'AUTHORIZE', '2025-02-10', '2027-02-09'],
+        ];
+        if (junior) grants.push([analyst2.id, 'PERFORM', '2026-03-01', '2028-02-29']);
+
+        for (const [userId, level, from, until] of grants) {
           competency.push({
             tenantId: TENANT_ID,
             userId,
             testDefinitionId: testId,
             level: level as never,
-            validFrom: new Date('2026-01-01'),
-            validUntil: new Date('2027-12-31'),
+            validFrom: new Date(from),
+            validUntil: new Date(until),
             grantedBy: admin.id,
-            evidenceNote: 'Analyst qualification per SOP/HR/007',
+            evidenceNote:
+              userId === analyst2.id
+                ? 'Initial qualification: 20 parallel determinations against Ravi Teja, ' +
+                  'reviewed by QA. Record COMP/26/0031, SOP/HR/007.'
+                : 'Annual re-assessment per SOP/HR/007; direct observation plus review of ' +
+                  'twenty consecutive results against the qualified analyst.',
           });
         }
       }
       await tx.userCompetency.createMany({ data: competency });
-      console.log(`    competency   ${competency.length} records`);
+      console.log(
+        `    competency   ${competency.length} records (Priya not yet qualified on microbiology/dissolution)`,
+      );
 
       // ------------------------------------------------------------- materials
       const materials = new Map<string, string>();
+      // Retest period per material, so a seeded batch derives its retest date
+      // the same way the goods-receipt endpoint does rather than by a constant.
+      const materialRetest = new Map<string, number | null>();
       const mkMaterial = async (data: {
         code: string;
         name: string;
@@ -477,6 +504,7 @@ async function main() {
           data: { tenantId: TENANT_ID, ...data, type: data.type as never },
         });
         materials.set(m.code, m.id);
+        materialRetest.set(m.code, data.retestPeriodDays ?? null);
         return m;
       };
 
@@ -603,7 +631,10 @@ async function main() {
       await mkSpec('API-PCM', 'SPEC/API-PCM/01', 'IP 2022 monograph — Paracetamol', [
         { analyte: 'DESC', test: 'TDESC', text: 'White crystalline powder' },
         { analyte: 'IDEN', test: 'TIDEN', text: 'Complies by IR' },
-        { analyte: 'ASSAY', test: 'TASSAY', min: 98.0, max: 102.0, unit: '%' },
+        // IP is 99.0-101.0 % on the dried basis. 98.0-102.0 is the USP range,
+        // and citing one pharmacopoeia while using another's limits is the first
+        // thing a QC head checks on a specification.
+        { analyte: 'ASSAY', test: 'TASSAY', min: 99.0, max: 101.0, unit: '%' },
         { analyte: 'LOD', test: 'TLOD', max: 0.5, unit: '%' },
         { analyte: 'SASH', test: 'TSASH', max: 0.1, unit: '%', critical: false },
         { analyte: 'RSUB', test: 'TRSUB', max: 0.5, unit: '%' },
@@ -712,7 +743,16 @@ async function main() {
             containerCount: data.containers,
             manufacturedAt: daysAgo(data.mfgAgo),
             expiryDate: daysAhead(data.expiryIn),
-            retestDate: daysAhead(Math.min(data.expiryIn, 730)),
+            // Only materials that carry a retest period get a retest date, and
+            // never past expiry. A finished product and a reel of blister foil
+            // have an expiry and nothing to retest — showing "retest due" against
+            // a pack of tablets is the kind of detail a Head of Quality reads as
+            // "these people have not worked in a plant".
+            retestDate: (() => {
+              const period = materialRetest.get(materialCode) ?? null;
+              if (period === null) return null;
+              return daysAhead(Math.min(period - data.mfgAgo, data.expiryIn));
+            })(),
             status: data.status as never,
             location: data.location,
             dispositionedAt: data.dispositionedAgo ? daysAgo(data.dispositionedAgo) : null,
@@ -732,7 +772,10 @@ async function main() {
         unit: 'kg',
         containers: 20,
         mfgAgo: 90,
-        expiryIn: 1000,
+        // 4-year shelf life against a 3-year retest period: the retest falls due
+        // roughly nine months before expiry, which is what puts the batch on the
+        // stores retest queue while there is still time to act on it.
+        expiryIn: 1370,
         status: 'APPROVED',
         location: 'Approved Store — Rack A3',
         dispositionedAgo: 18,
@@ -746,7 +789,7 @@ async function main() {
         unit: 'kg',
         containers: 10,
         mfgAgo: 60,
-        expiryIn: 900,
+        expiryIn: 1400,
         status: 'REJECTED',
         location: 'Rejected Store — Cage R1 (locked)',
         dispositionedAgo: 9,
@@ -760,7 +803,7 @@ async function main() {
         unit: 'kg',
         containers: 32,
         mfgAgo: 40,
-        expiryIn: 700,
+        expiryIn: 1050,
         status: 'APPROVED',
         location: 'Approved Store — Rack B1',
         dispositionedAgo: 5,
@@ -774,7 +817,7 @@ async function main() {
         unit: 'kg',
         containers: 4,
         mfgAgo: 20,
-        expiryIn: 700,
+        expiryIn: 1050,
         status: 'UNDER_TEST',
         location: 'Quarantine Store — Rack Q2',
       });
@@ -857,7 +900,12 @@ async function main() {
         model: '1260 Infinity II',
         serial: 'DEAB-70412',
         department: 'INSTRUMENTATION',
-        protocol: 'HL7_V2',
+        // An HPLC does not speak HL7 — that is a clinical protocol. Results
+        // reach the LIMS as a signed result export from the chromatography data
+        // system (OpenLab/Empower), which the gateway watches and normalises.
+        // Labelling this HL7 is the kind of detail that tells a QC head the
+        // vendor has never stood in an instrument room.
+        protocol: 'FILE_CSV',
         location: 'Instrument Room 1',
         channels: [
           ['ASSAY', 'ASSAY'],
@@ -1394,7 +1442,7 @@ async function seedWorkflow(): Promise<void> {
         const byCode = Object.fromEntries(approved.sampleTests.map((x) => [x.td.code, x.st.id]));
         await putResult(byCode.TDESC!, 'DESC', 'White crystalline powder', { when: w, ref: 'White crystalline powder' });
         await putResult(byCode.TIDEN!, 'IDEN', 'Complies', { when: w, ref: 'Complies by IR' });
-        await putResult(byCode.TASSAY!, 'ASSAY', '99.62', { numeric: 99.62, when: w, unit: '%', ref: '98.0 – 102.0' });
+        await putResult(byCode.TASSAY!, 'ASSAY', '99.62', { numeric: 99.62, when: w, unit: '%', ref: '99.0 – 101.0' });
         await putResult(byCode.TLOD!, 'LOD', '0.21', { numeric: 0.21, when: w, unit: '%', ref: 'NMT 0.5' });
         await putResult(byCode.TRSUB!, 'RSUB', '0.114', { numeric: 0.114, when: w, unit: '%', ref: 'NMT 0.5' });
         await putResult(byCode.TRSUB!, 'RSING', '0.041', { numeric: 0.041, when: w, unit: '%', ref: 'NMT 0.1' });
@@ -1405,7 +1453,7 @@ async function seedWorkflow(): Promise<void> {
             batchId: approved.batch.id,
             decision: 'APPROVED',
             rationale:
-              'All tests comply with SPEC/API-PCM/01 v1. Assay 99.62% (98.0–102.0), total related substances ' +
+              'All tests comply with SPEC/API-PCM/01 v1. Assay 99.62% (99.0–101.0), total related substances ' +
               '0.114% (NMT 0.5%). Supplier COA cross-checked and consistent. Released for manufacturing use.',
             decidedBy: qa.id,
             decidedAt: daysAgo(18),

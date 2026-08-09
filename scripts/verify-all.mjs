@@ -32,7 +32,7 @@ const SUITES = [
   { name: 'Consumables, lot traceability, CSV export', cmd: ['node', 'scripts/features-verify.mjs', API], signsIn: true },
   { name: 'Stores control, admin, competency, OOS', cmd: ['node', 'scripts/admin-verify.mjs', API], signsIn: true },
   { name: 'Manufacturing QC — stores, spec, QA release', cmd: ['node', 'scripts/pharma-verify.mjs', API], signsIn: true },
-  { name: 'Head of Quality walkthrough', cmd: ['node', 'scripts/owner-walkthrough.mjs', API, WEB], signsIn: true },
+  { name: 'QA Manager walkthrough', cmd: ['node', 'scripts/owner-walkthrough.mjs', API, WEB], signsIn: true },
   { name: 'Web UI, session, PWA, headers', cmd: ['node', 'scripts/ui-verify.mjs', WEB, API], signsIn: true },
   { name: 'Visual — real Chromium, 4 viewports', cmd: ['node', 'scripts/visual-verify.mjs', WEB, API], signsIn: true },
   { name: 'Responsive — 320px, landscape, 200% zoom, print', cmd: ['node', 'scripts/responsive-audit.mjs', WEB, API], signsIn: true },

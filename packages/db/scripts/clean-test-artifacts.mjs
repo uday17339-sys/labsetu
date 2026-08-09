@@ -61,6 +61,7 @@ try {
               { email: { startsWith: 'verify.' } },
               { email: { startsWith: 'newtech.' } },
               { email: { startsWith: 'norole.' } },
+              { email: { startsWith: 'walkthrough.' } },
             ],
           },
           select: { id: true, email: true, fullName: true },
@@ -116,13 +117,31 @@ try {
           select: { id: true, code: true, name: true },
         });
 
+        // Every prefix a verification suite books a consignment under. These
+        // are what makes the stores screen read as a real warehouse or as a
+        // test harness: "GW-1786216545485" sitting next to "PCM/26/0141" is the
+        // detail that ends a demo. Add the prefix here whenever a suite starts
+        // creating batches under a new one.
+        const VERIFY_BATCH_PREFIXES = [
+          'VER-', // pharma-verify
+          'CLEAN-', // pharma-verify, the clean-release path
+          'EXP-', // expiry validation probes
+          'NS-', // the no-specification material
+          'SMK-', // smoke-test
+          'GW-', // gateway-e2e
+          'QCG-', // qc-verify, the QC gate scenario
+          'ADM-', // admin-verify
+          'BADEXP-', // admin-verify, the inverted-date probe
+          'FEAT-', // features-verify
+          'WT-', // owner-walkthrough
+          'RESP-', // responsive-audit
+          'PROBE-', // ad-hoc diagnostic probes
+        ];
+
         const verifyBatches = await tx.materialBatch.findMany({
           where: {
             OR: [
-              { batchNumber: { startsWith: 'VER-' } },
-              { batchNumber: { startsWith: 'CLEAN-' } },
-              { batchNumber: { startsWith: 'EXP-' } },
-              { batchNumber: { startsWith: 'NS-' } },
+              ...VERIFY_BATCH_PREFIXES.map((p) => ({ batchNumber: { startsWith: p } })),
               { materialId: { in: verifyMaterials.map((m) => m.id) } },
             ],
           },

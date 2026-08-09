@@ -116,10 +116,24 @@ export class OosDetectorService {
       });
       if (existing) continue;
 
-      const count = await tx.oosInvestigation.count();
-      const investigationNumber = `OOS${new Date().toISOString().slice(2, 10).replace(/-/g, '')}${String(
-        count + 1,
-      ).padStart(3, '0')}`;
+      // OOS/YY/NNNN — the house format Indian plants use for quality records,
+      // and the format every investigation already in the register carries.
+      // A system-generated number that looks different from the ones in the
+      // binder is the first thing an auditor asks about.
+      // Continue the series rather than counting rows. Numbering in a real
+      // register is sparse — investigations get raised in other systems, or a
+      // number is reserved and never used — so counting would eventually hand
+      // out a number that already exists, and the unique constraint would turn
+      // that into a failed result entry at the bench.
+      const year = new Date().getFullYear() % 100;
+      const prefix = `OOS/${year}/`;
+      const highest = await tx.oosInvestigation.findFirst({
+        where: { investigationNumber: { startsWith: prefix } },
+        orderBy: { investigationNumber: 'desc' },
+        select: { investigationNumber: true },
+      });
+      const next = highest ? Number(highest.investigationNumber.slice(prefix.length)) + 1 : 1;
+      const investigationNumber = `${prefix}${String(next).padStart(4, '0')}`;
 
       const unit = limit.unit ?? result.analyte.defaultUnit ?? '';
       const limitText =

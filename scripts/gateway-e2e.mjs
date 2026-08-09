@@ -36,7 +36,17 @@ const bad = (l, d = '') => {
 };
 const section = (t) => console.log(`\n\x1b[1m${t}\x1b[0m`);
 
-async function api(method, path, { token, body } = {}) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Backs off on 429 rather than reporting the limiter as a product failure.
+ *
+ * Without this, a throttled login returns an error body, every later call runs
+ * unauthenticated, and the suite reports "source=undefined" and "missing bearer
+ * token" — which reads as broken ingest rather than as a rate limit doing its
+ * job. The limiter is correct; the client has to be well-behaved.
+ */
+async function api(method, path, { token, body } = {}, attempt = 0) {
   const res = await fetch(`${BASE}/v1${path}`, {
     method,
     headers: {
@@ -45,6 +55,10 @@ async function api(method, path, { token, body } = {}) {
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
+  if (res.status === 429 && attempt < 4) {
+    await sleep(21_000);
+    return api(method, path, { token, body }, attempt + 1);
+  }
   const text = await res.text();
   let json = null;
   try {
@@ -87,18 +101,24 @@ async function devicePost(creds, path, body, { tamper = false, omitSignature = f
   return { status: res.status, body: json };
 }
 
-function buildHl7(accession, results) {
-  const stamp = '20260801094500';
+/**
+ * A result export from the chromatography data system, as the gateway sees it.
+ *
+ * This is what an HPLC actually hands over — a signed result file from OpenLab
+ * or Empower keyed on the AR number, not an HL7 ORU message. HL7 is a clinical
+ * protocol; the parsers still support it for the diagnostics vertical, but no
+ * instrument in a QC lab speaks it.
+ */
+function buildCdsExport(accession, results) {
+  const stamp = '2026-08-01 09:45:00';
   const lines = [
-    `MSH|^~\\&|AU480|SUNRISE|LABSETU|LAB|${stamp}||ORU^R01|MSG${Date.now()}|P|2.5`,
-    `PID|1||UNKNOWN||DOE^JOHN||19800101|M`,
-    `OBR|1|${accession}|${accession}|PANEL^Chemistry|||${stamp}`,
+    'SampleName,SampleSetName,Acquired,Component,Amount,Units,Result Status',
     ...results.map(
-      (r, i) =>
-        `OBX|${i + 1}|NM|${r.code}^${r.code}||${r.value}|${r.units ?? ''}|||||F|||${stamp}`,
+      (r) =>
+        `${accession},RELEASE-${accession},${stamp},${r.code},${r.value},${r.units ?? ''},Final`,
     ),
   ];
-  return lines.join('\r');
+  return lines.join('\r\n');
 }
 
 async function main() {
@@ -170,13 +190,13 @@ async function main() {
   const dummyEnvelope = {
     messageId: randomUUID(),
     deviceId: creds.deviceId,
-    protocol: 'HL7_V2',
+    protocol: 'FILE_CSV',
     capturedAt: new Date().toISOString(),
     rawChecksum: createHash('sha256').update('x').digest('hex'),
     observations: [
       {
-        specimenRef: 'NOPE',
-        testCode: 'GLU',
+        specimenRef: 'NOT-AN-AR-NUMBER',
+        testCode: 'ASSAY',
         value: '100',
         resultStatus: 'FINAL',
         rerunCount: 0,
@@ -222,7 +242,9 @@ async function main() {
   ).body;
 
   const exceptions = await api('GET', '/ingest/exceptions', { token: tech.accessToken });
-  const unknownSpec = (exceptions.body ?? []).find((e) => e.specimenRef === 'NOPE');
+  const unknownSpec = (exceptions.body ?? []).find(
+    (e) => e.specimenRef === 'NOT-AN-AR-NUMBER',
+  );
   unknownSpec?.reason === 'UNKNOWN_SPECIMEN'
     ? ok('unknown specimen held for review', `reason=${unknownSpec.reason}`)
     : bad('unknown specimen held', JSON.stringify(exceptions.body).slice(0, 200));
@@ -299,14 +321,14 @@ async function main() {
   }
   assayTestId ? ok('assay test booked from the specification') : bad('assay test booked');
 
-  const hl7Raw = buildHl7(accession, [{ code: 'ASSAY', value: '99.42', units: '%' }]);
+  const rawExport = buildCdsExport(accession, [{ code: 'ASSAY', value: '99.42', units: '%' }]);
   const envelope = {
     messageId: randomUUID(),
     deviceId: creds.deviceId,
-    protocol: 'HL7_V2',
+    protocol: 'FILE_CSV',
     capturedAt: new Date().toISOString(),
-    rawChecksum: createHash('sha256').update(hl7Raw, 'utf8').digest('hex'),
-    rawPreview: hl7Raw.slice(0, 4096),
+    rawChecksum: createHash('sha256').update(rawExport, 'utf8').digest('hex'),
+    rawPreview: rawExport.slice(0, 4096),
     observations: [
       {
         specimenRef: accession,
@@ -346,7 +368,7 @@ async function main() {
     ? ok('result provenance recorded', 'source=INSTRUMENT')
     : bad('result provenance', `source=${assay?.source}`);
 
-  // 99.42 sits inside 98.0–102.0, so no investigation should be raised.
+  // 99.42 sits inside 99.0–101.0, so no investigation should be raised.
   after.body?.status === 'RESULT_ENTERED'
     ? ok('instrument results are NOT auto-authorised', 'human review still required')
     : bad('not auto-authorised', `status=${after.body?.status}`);

@@ -56,13 +56,21 @@ export class CoaService {
     });
     const version = existing ? existing.version + 1 : 1;
 
-    const count = await tx.certificateOfAnalysis.count();
-    const coaNumber = existing
-      ? existing.coaNumber
-      : `COA${new Date().toISOString().slice(2, 10).replace(/-/g, '')}${String(count + 1).padStart(
-          4,
-          '0',
-        )}`;
+    // COA/YY/NNNN, matching the house format on every certificate already
+    // issued. A reissue keeps the original number and only bumps the version —
+    // the customer holds a copy quoting that number.
+    // Continues the series rather than counting rows: certificate numbers in a
+    // real register are sparse, and counting would eventually reissue a number
+    // that a customer already holds a document for.
+    const year = new Date().getFullYear() % 100;
+    const prefix = `COA/${year}/`;
+    const highest = await tx.certificateOfAnalysis.findFirst({
+      where: { coaNumber: { startsWith: prefix } },
+      orderBy: { coaNumber: 'desc' },
+      select: { coaNumber: true },
+    });
+    const next = highest ? Number(highest.coaNumber.slice(prefix.length)) + 1 : 1;
+    const coaNumber = existing ? existing.coaNumber : `${prefix}${String(next).padStart(4, '0')}`;
 
     // The hash covers exactly what the certificate asserts, so a reissue that
     // changes nothing is detectable as such.

@@ -305,7 +305,7 @@ async function main() {
       {
         specimenRef: accession,
         testCode: 'ASSAY',
-        // Comfortably inside the 98.0–102.0 % specification, so the ONLY thing
+        // Comfortably inside the 99.0–101.0 % specification, so the ONLY thing
         // that can block authorisation later is the failed control.
         value: '99.60',
         units: '%',

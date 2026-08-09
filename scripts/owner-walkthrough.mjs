@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * The Head of Quality's walkthrough.
+ * The QA Manager's walkthrough.
  *
  * Not a test of what was built — a test of what someone who is ACCOUNTABLE for
  * a manufacturing site's quality actually has to do, week to week. Each task
- * below is something Dr Suresh Menon (Head of Quality, Vantage Pharmaceuticals,
+ * below is something Dr Suresh Menon (QA Manager, Vantage Pharmaceuticals,
  * Hyderabad) does in a normal week, and every one of them is attempted for real
  * against the running system.
  *
@@ -95,7 +95,7 @@ async function authorize(testId, signer) {
 
 async function main() {
   console.log(
-    `\n\x1b[1mHead of Quality walkthrough — Dr Suresh Menon, Vantage Pharmaceuticals\x1b[0m\n`,
+    `\n\x1b[1mQA Manager walkthrough — Dr Suresh Menon, Vantage Pharmaceuticals\x1b[0m\n`,
   );
   console.log(`  "Can I actually run my quality system on this?"\n`);
 
