@@ -31,7 +31,13 @@ import { DEFAULT_ROLES, PHARMA_ROLE_CODES } from '@labsetu/contracts';
 
 const prisma = new PrismaClient();
 
-const TENANT_ID = '0195c0de-0000-7000-8000-000000000001';
+/**
+ * Overridable so this seed can add a manufacturing tenant to a database that
+ * already carries one from an earlier run, instead of refusing because the
+ * fixed id is taken. Two tenants side by side is also the honest way to show
+ * row-level isolation: sign into each and the other's data does not exist.
+ */
+const TENANT_ID = process.env.SEED_TENANT_ID ?? '0195c0de-0000-7000-8000-000000000001';
 const DEMO_PASSWORD = 'LabSetu@2026';
 
 const masterKey = masterKeyFromBase64(requireEnv('ENCRYPTION_MASTER_KEY'));

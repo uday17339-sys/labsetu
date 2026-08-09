@@ -44,6 +44,44 @@ const prisma = new PrismaClient();
 
 const label = (n) => (n === 1 ? '' : 's');
 
+/**
+ * Gives back the stock a deleted test run consumed.
+ *
+ * inventory_lot.quantityRemaining is a cached balance whose source of truth is
+ * the stock_transaction ledger — the schema says so explicitly. Deleting the
+ * consumption rows without returning the quantity leaves the balance reduced
+ * with nothing to explain it, and the ledger stops adding up: a lot reading
+ * 288, then a row marked -25 landing at 163.
+ *
+ * That is precisely the inconsistency an inspector looks for in a stock record,
+ * and it would have been created by the cleanup tool rather than by the system.
+ * The consumption never physically happened, so the honest correction is to put
+ * the quantity back.
+ */
+async function returnConsumedStock(tx, testIds) {
+  if (testIds.length === 0) return 0;
+
+  const consumed = await tx.stockTransaction.findMany({
+    where: { sampleTestId: { in: testIds }, type: 'CONSUMPTION' },
+    select: { lotId: true, quantity: true },
+  });
+
+  const byLot = new Map();
+  for (const t of consumed) {
+    // Consumption is stored negative; returning it is a subtraction of that.
+    byLot.set(t.lotId, (byLot.get(t.lotId) ?? 0) - Number(t.quantity));
+  }
+
+  for (const [lotId, qty] of byLot) {
+    if (qty <= 0) continue;
+    await tx.inventoryLot.update({
+      where: { id: lotId },
+      data: { quantityRemaining: { increment: qty } },
+    });
+  }
+  return byLot.size;
+}
+
 try {
   const tenants = await prisma.$queryRaw`SELECT * FROM labsetu_list_tenants()`;
 
@@ -277,6 +315,7 @@ try {
           await tx.invoiceItem.deleteMany({ where: { invoiceId: { in: invoiceIds } } });
           await tx.invoice.deleteMany({ where: { id: { in: invoiceIds } } });
 
+          await returnConsumedStock(tx, testIds);
           await tx.stockTransaction.deleteMany({ where: { sampleTestId: { in: testIds } } });
           await tx.result.deleteMany({ where: { sampleTestId: { in: testIds } } });
           // Signatures are NOT removed. The app role holds no DELETE grant on
@@ -318,6 +357,7 @@ try {
                 select: { id: true },
               })
             ).map((x) => x.id);
+            await returnConsumedStock(tx, tIds);
             await tx.stockTransaction.deleteMany({ where: { sampleTestId: { in: tIds } } });
             await tx.result.deleteMany({ where: { sampleTestId: { in: tIds } } });
             await tx.sampleTest.deleteMany({ where: { id: { in: tIds } } });
