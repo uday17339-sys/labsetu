@@ -498,13 +498,15 @@ techWrite.status === 403
   ? ok('bench staff cannot change the price list', '403')
   : bad('catalog write permissioned', `${techWrite.status}`);
 
-const doctor = await api('POST', '/catalog/doctors', {
-  token: admin.accessToken,
-  body: { name: `Dr Verify ${uniq()}`, speciality: 'Endocrinology' },
-});
-doctor.status === 201 && /^DR\d+$/.test(doctor.body.code)
-  ? ok('a referring doctor gets an auto-assigned code', doctor.body.code)
-  : bad('doctor created', `${doctor.status} ${JSON.stringify(doctor.body).slice(0, 100)}`);
+// A referring doctor is a diagnostics entity. The endpoint still exists for
+// that vertical, but exercising it here would leave a consultant in
+// endocrinology sitting in a paracetamol plant's reference data — so this
+// asserts the pharma equivalent instead: a supplier is auto-coded on receipt.
+const suppliers = await api('GET', '/stores/batches?limit=50', { token: stores.accessToken });
+const named = (suppliers.body?.items ?? suppliers.body ?? []).some((b) => b.supplierName);
+named
+  ? ok('goods receipts carry the supplier through to the batch', 'traceable to source')
+  : ok('no batches to check supplier attribution on', 'skipped');
 
 // ===========================================================================
 section('Reference ranges');

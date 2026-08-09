@@ -111,25 +111,44 @@ LAN, which no cloud function can do).
 
 ## Verification
 
-**405 checks across 10 suites**, one command, runnable against any deployment:
+**429 checks across 11 suites**, one command, runnable against any deployment:
 
 ```bash
 npm run verify https://localhost     # the hosted stack
 npm run verify                       # local dev
 ```
 
+> **Before showing the system to anyone, clean up after the suites.**
+>
+> The verification suites book real consignments, raise real investigations and
+> onboard real staff — that is what makes them worth running. They also leave
+> that behind. A stores screen listing `GW-1786216545485` next to `PCM/26/0141`
+> undoes the demo faster than any missing feature:
+>
+> ```bash
+> npm run db:clean-tests           # dry run — lists what would go
+> npm run db:clean-tests -- --apply
+> ```
+>
+> It removes only records matching the suites' own naming patterns, and it will
+> not touch the audit trail or any electronic signature: both are append-only at
+> the database grant level, so an attempt fails loudly rather than succeeding
+> quietly. The entries recording that the test activity happened are correct and
+> stay.
+
 | Suite | Checks | Covers |
 |---|---|---|
-| Clinical workflow | 53 | register → accession → result → verify → authorise → report |
-| Gateway → API | 22 | device auth, HMAC, idempotency, channel mapping, held queue |
+| Batch workflow | 40 | goods receipt → quarantine → sampling → AR number → result → verify → authorise |
+| Gateway → API | 20 | device auth, HMAC, idempotency, channel mapping, held queue |
 | ASTM / HL7 parsers | 35 | real analyzer messages, odd delimiters, hostile input |
-| Quality control | 26 | Westgard rules, drift detection, **the QC gate blocking and unblocking authorisation** |
-| Inventory, history, export | 35 | **the expired-reagent gate**, FEFO, auto-consumption, cumulative history, CSV safety |
-| Billing, admin, competency | 72 | **over-payment refused**, **cancel-with-payments refused**, **competency without evidence refused**, catalog versioning, **callback read-back required**, **every payment mode round-tripped against the database enum** |
-| Manufacturing QC | 50 | **quarantined material cannot be issued**, **sampling without an approved spec refused**, **OOS opens automatically and blocks release**, **critical excursion cannot be dispositioned around**, QC/QA separation |
-| Web UI | 38 | session refresh, PWA, RBAC in the UI, edge headers |
+| Quality control | 27 | Westgard rules, drift detection, **the QC gate blocking and unblocking authorisation** |
+| Consumables & traceability | 36 | **the expired-standard gate**, FEFO, auto-consumption per run, **which lot produced which result**, CSV safety |
+| Stores, admin, competency, OOS | 61 | **quarantined stock cannot be issued**, **duplicate supplier batch refused**, **competency without evidence refused**, spec authoring, **an OOS cannot be closed with a shrug**, role separation asserted on the role definitions |
+| Manufacturing QC | 51 | **sampling without an approved spec refused**, **OOS opens automatically and blocks release**, **critical excursion cannot be dispositioned around**, QC/QA separation |
+| QA Manager walkthrough | 40 | a week of real work end to end — receive, sample, test, release under signature, certify, issue, face an auditor |
+| Web UI | 39 | session refresh, PWA, RBAC in the UI, edge headers |
 | Visual (real Chromium) | 45 | 4 viewports — overflow, touch targets, legibility, console errors |
-| Responsive edge cases | 29 | 320px, landscape, 200% zoom, form error states, print stylesheet |
+| Responsive edge cases | 35 | 320px, landscape, 200% zoom, form error states, the CoA print stylesheet |
 
 A separate static audit checks that nothing is *declared* without being *wired* —
 a permission with no route, a model nothing reads, an endpoint no screen reaches:
@@ -144,10 +163,11 @@ and desktop sizes, and writes screenshots to `.playwright/`. Asserting that a
 
 These assert the controls actually fire, rather than assuming they do:
 
-- a technician cannot authorise (RBAC), and the person who entered a result cannot authorise it (four-eyes)
+- a QC analyst cannot release a batch (RBAC), and the person who entered a result cannot authorise it (four-eyes)
 - authorisation without a valid signature is refused, and a signature bound to stale content is refused
 - an unsigned or tampered analyzer message is rejected; a replayed one is a no-op
 - an unmatched analyzer result is **held**, never guessed
+- a retest date is never set beyond the batch's own expiry date
 - instrument results are **never** auto-authorised
 - the audit trail contains no PII or secrets, and the chain verifies
 - `UPDATE audit_log` is denied by the database itself
@@ -231,18 +251,20 @@ when those modules land, and so nobody discovers the gap by clicking into it.
 `npm run audit:trace` fails if that list disagrees with what the routes
 actually enforce.
 
-### The lab owner's walkthrough
+### The QA Manager's walkthrough
 
 `npm run walkthrough` is a different question from the suites above: not "does
-the code work" but "can somebody who RUNS a diagnostic lab get through a normal
-week". It attempts 35 real tasks end to end — take payment, onboard a
-technician, add a test, raise a price, call a critical value through, amend a
-released report — and reports what it could not do.
+the code work" but "can the person ACCOUNTABLE for a site's quality get through a
+normal week". It attempts 40 real tasks end to end — book in a consignment,
+prove untested stock cannot reach production, sample it, test it against the
+specification, release it under an electronic signature, issue the certificate,
+issue the material to a production order, escalate an investigation, and hand an
+unannounced auditor a verifiable trail — and reports what it could not do.
 
-Current result: **33 tasks work · 2 gaps · 0 blockers.** The two gaps are
-partial-name patient search (blocked by the blind-index design, ADR 0005 — phone,
-code, exact name and a registration-date window all work) and WhatsApp delivery
-(no provider wired).
+Current result: **40 tasks work · 0 gaps · 0 blockers.**
+
+It is written to be able to fail. Every task asserts the outcome, several assert
+that the system REFUSES something, and a blocker exits non-zero.
 
 ---
 

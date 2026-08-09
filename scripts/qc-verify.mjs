@@ -69,7 +69,18 @@ async function api(method, path, { token, body } = {}, attempt = 0) {
 }
 
 /** Signs a gateway request exactly as apps/gateway/src/api-client.ts does. */
-async function devicePost(creds, path, body) {
+/**
+ * Retries a throttled device post.
+ *
+ * The ingest bucket is per-device, and a suite that enrols and immediately
+ * streams results can trip it. A 429 here used to cascade: no result landed, so
+ * the test never acquired an analyzer, so the QC gate had nothing to gate and
+ * reported itself broken. Four failures, one rate limit, zero product defects.
+ *
+ * The signature covers the timestamp and nonce, so a retry has to re-sign
+ * rather than replay the original headers.
+ */
+async function devicePost(creds, path, body, attempt = 0) {
   const payload = JSON.stringify(body);
   const timestamp = String(Date.now());
   const nonce = randomUUID();
@@ -89,6 +100,10 @@ async function devicePost(creds, path, body) {
     },
     body: payload,
   });
+  if (res.status === 429 && attempt < 4) {
+    await sleep(21_000);
+    return devicePost(creds, path, body, attempt + 1);
+  }
   return { status: res.status, body: await res.json().catch(() => null) };
 }
 

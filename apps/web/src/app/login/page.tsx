@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { apiLogin } from '@/lib/api';
 import { setSession, type SessionUser } from '@/lib/session';
+import { DEMO, PITCH, SHOW_DEMO_ACCOUNTS } from '@/lib/vertical';
 
 export const dynamic = 'force-dynamic';
 
@@ -77,11 +78,7 @@ export default async function LoginPage({
             accreditation depends on.
           </p>
           <dl className="mt-8 space-y-3 text-sm">
-            {[
-              ['NABL / ISO 15189', 'Competency, QC gating, quality indicators'],
-              ['DPDP Act, 2023', 'Consent, encryption, India-only residency'],
-              ['Analyzer integration', 'ASTM and HL7 normalised at the edge'],
-            ].map(([term, desc]) => (
+            {PITCH.map(([term, desc]) => (
               <div key={term} className="flex gap-3">
                 <dt className="w-40 shrink-0 font-medium text-brand-100">{term}</dt>
                 <dd className="text-ink-400">{desc}</dd>
@@ -137,7 +134,7 @@ export default async function LoginPage({
             <Field
               label="Tenant code"
               name="tenantCode"
-              defaultValue={params.tenantCode ?? 'SUNRISE'}
+              defaultValue={params.tenantCode ?? DEMO.tenantCode}
               autoComplete="organization"
               required
               hint="Your lab's short code"
@@ -173,29 +170,40 @@ export default async function LoginPage({
             </button>
           </form>
 
-          <details className="mt-8 rounded-md border border-ink-200 bg-white p-3 text-sm">
-            <summary className="cursor-pointer font-medium text-ink-700">
-              Demo accounts
-            </summary>
-            <p className="mt-2 text-xs text-ink-500">
-              Tenant <code className="rounded bg-ink-100 px-1">SUNRISE</code>, password{' '}
-              <code className="rounded bg-ink-100 px-1">LabSetu@2026</code>
-            </p>
-            <ul className="mt-2 space-y-1 text-xs text-ink-600">
-              <li>
-                <code>pathologist@sunrise.test</code> — can authorise results
-              </li>
-              <li>
-                <code>tech@sunrise.test</code> — enters and verifies, cannot authorise
-              </li>
-              <li>
-                <code>front@sunrise.test</code> — registration and billing
-              </li>
-              <li>
-                <code>auditor@sunrise.test</code> — read-only + audit trail
-              </li>
-            </ul>
-          </details>
+          {/*
+            Listed in the order a batch moves through the plant — stores receive
+            it, QC test it, QA release it — so a visitor can follow one batch
+            across four logins and watch the separation of duties do its work.
+          */}
+          {SHOW_DEMO_ACCOUNTS && (
+            <details className="mt-8 rounded-md border border-ink-200 bg-white p-3 text-sm">
+              <summary className="cursor-pointer font-medium text-ink-700">Demo accounts</summary>
+
+              <p className="mt-2 text-xs text-ink-500">
+                {DEMO.tenantName} — tenant{' '}
+                <code className="rounded bg-ink-100 px-1">{DEMO.tenantCode}</code>, password{' '}
+                <code className="rounded bg-ink-100 px-1">{DEMO.password}</code> for every account
+                below.
+              </p>
+
+              <ul className="mt-3 space-y-2 text-xs text-ink-600">
+                {DEMO.accounts.map((a) => (
+                  <li key={a.email} className="min-w-0">
+                    <code className="block break-all font-medium text-ink-800">{a.email}</code>
+                    <span className="block text-ink-500">
+                      {a.role} — {a.can}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+
+              <p className="mt-3 border-t border-ink-100 pt-2 text-[11px] leading-relaxed text-ink-400">
+                Seeded demo data. Sign in as Stores, then QC, then QA to follow one batch from
+                the gate to release — no single account can do the whole journey, which is the
+                point.
+              </p>
+            </details>
+          )}
         </div>
       </div>
     </div>

@@ -70,7 +70,23 @@ async function api(method, path, { token, body } = {}, attempt = 0) {
 }
 
 /** Signs exactly as apps/gateway/src/api-client.ts does. */
-async function devicePost(creds, path, body, { tamper = false, omitSignature = false } = {}) {
+/**
+ * Retries a throttled device post.
+ *
+ * The ingest bucket is per-device, and a suite that enrols and immediately
+ * streams results can trip it. A 429 here used to cascade: no result landed, so
+ * the test never acquired an analyzer, so the QC gate had nothing to gate and
+ * reported itself broken. Four failures, one rate limit, zero product defects.
+ *
+ * The signature covers the timestamp and nonce, so a retry has to re-sign
+ * rather than replay the original headers.
+ */
+async function devicePost(
+  creds,
+  path,
+  body,
+  { tamper = false, omitSignature = false, attempt = 0 } = {},
+) {
   const payload = JSON.stringify(body);
   const timestamp = String(Date.now());
   const nonce = randomUUID();
@@ -91,6 +107,12 @@ async function devicePost(creds, path, body, { tamper = false, omitSignature = f
   const sent = tamper ? payload.replace(/"value":"[^"]*"/, '"value":"999"') : payload;
 
   const res = await fetch(`${BASE}${path}`, { method: 'POST', headers, body: sent });
+  // Only the clean path retries. The tamper and unsigned probes expect a
+  // rejection, and retrying them would just wait out the limiter twice.
+  if (res.status === 429 && !tamper && !omitSignature && attempt < 4) {
+    await sleep(21_000);
+    return devicePost(creds, path, body, { tamper, omitSignature, attempt: attempt + 1 });
+  }
   const text = await res.text();
   let json = null;
   try {
