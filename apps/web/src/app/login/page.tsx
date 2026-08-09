@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation';
-import { apiLogin } from '@/lib/api';
+import { apiLogin, ApiError } from '@/lib/api';
 import { setSession, type SessionUser } from '@/lib/session';
 import { DEMO, PITCH, SHOW_DEMO_ACCOUNTS } from '@/lib/vertical';
 
@@ -19,10 +19,26 @@ async function signIn(formData: FormData): Promise<void> {
   let result: { status: string; accessToken?: string; refreshToken?: string; user?: SessionUser };
   try {
     result = (await apiLogin({ tenantCode, email, password, totpCode })) as typeof result;
-  } catch {
-    // Uniform message: distinguishing "no such user" from "wrong password"
-    // hands an attacker a user-enumeration oracle.
-    redirect('/login?error=1');
+  } catch (e) {
+    // Bad credentials and a rate limit are NOT the same event, and telling a
+    // throttled user their password is wrong is how you make them retry — which
+    // keeps the bucket full and locks them out for longer. The login endpoint
+    // allows 10 attempts per minute PER IP, so a room full of people demoing
+    // from one office connection share that budget between them.
+    //
+    // What stays uniform is the credential case: 401 must not distinguish "no
+    // such user" from "wrong password", or it becomes a user-enumeration
+    // oracle. Everything else can and should say what actually happened.
+    const status = e instanceof ApiError ? e.status : 0;
+    const reason =
+      status === 429
+        ? 'throttled'
+        : status === 423
+          ? 'locked'
+          : status === 401 || status === 403
+            ? 'credentials'
+            : 'unavailable';
+    redirect(`/login?error=${reason}`);
   }
 
   if (result.status === 'MFA_REQUIRED') {
@@ -114,9 +130,32 @@ export default async function LoginPage({
           {params.error && (
             <div
               role="alert"
-              className="mt-5 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
+              className={`mt-5 rounded-md border px-3 py-2 text-sm ${
+                params.error === 'throttled'
+                  ? 'border-amber-200 bg-amber-50 text-amber-900'
+                  : 'border-red-200 bg-red-50 text-red-800'
+              }`}
             >
-              Invalid credentials. Check your tenant code, email and password.
+              {params.error === 'throttled' ? (
+                <>
+                  <span className="font-medium">Too many sign-in attempts.</span> Wait about a
+                  minute and try again — the limit is per network, so a colleague signing in at
+                  the same time counts towards it. Your password is fine.
+                </>
+              ) : params.error === 'locked' ? (
+                <>
+                  <span className="font-medium">This account is temporarily locked</span> after
+                  repeated failed attempts. Your administrator can unlock it.
+                </>
+              ) : params.error === 'unavailable' ? (
+                <>
+                  <span className="font-medium">Cannot reach the service.</span> This is not a
+                  password problem — try again shortly, and tell your administrator if it
+                  persists.
+                </>
+              ) : (
+                <>Invalid credentials. Check your tenant code, email and password.</>
+              )}
             </div>
           )}
 

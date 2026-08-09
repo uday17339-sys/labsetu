@@ -14,13 +14,30 @@ import { Public, RequirePermissions } from '../../common/rbac/permissions.decora
 import { zodPipe } from '../../common/pipes/zod-validation.pipe';
 import { CurrentUser, type CurrentUserInfo } from '../../common/decorators/current-user.decorator';
 
+/**
+ * Sign-in attempts allowed per minute, per IP.
+ *
+ * Read from the environment directly rather than through the DI config, because
+ * @Throttle is evaluated when the class is defined, before the container
+ * exists. The value must match what app.module.ts gives the named 'auth'
+ * bucket, and both read the same variable.
+ *
+ * This used to be a hardcoded 10 while AUTH_RATE_LIMIT_MAX configured the
+ * bucket the decorator then overrode — so the setting did nothing, and an
+ * operator lowering it to harden the system would have got no effect and
+ * believed otherwise. The other two routes keep their original ratios to this
+ * one: a session refreshes more often than it signs in, and signing a record
+ * sits between the two.
+ */
+const AUTH_LIMIT = Number(process.env.AUTH_RATE_LIMIT_MAX ?? 10) || 10;
+
 @Controller({ path: 'auth', version: '1' })
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
   /** Rate limited hard: this is the endpoint an attacker will hammer. */
   @Public()
-  @Throttle({ auth: { limit: 10, ttl: 60_000 } })
+  @Throttle({ auth: { limit: AUTH_LIMIT, ttl: 60_000 } })
   @HttpCode(200)
   @Post('login')
   login(@Body(zodPipe(loginSchema)) body: unknown) {
@@ -28,7 +45,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ auth: { limit: 30, ttl: 60_000 } })
+  @Throttle({ auth: { limit: AUTH_LIMIT * 3, ttl: 60_000 } })
   @HttpCode(200)
   @Post('refresh')
   refresh(@Body(zodPipe(refreshSchema)) body: { refreshToken: string }) {
@@ -94,7 +111,7 @@ export class AuthController {
    * short-lived token bound to this exact record and its content hash.
    */
   @RequirePermissions(PERMISSIONS.RESULT_VERIFY)
-  @Throttle({ auth: { limit: 20, ttl: 60_000 } })
+  @Throttle({ auth: { limit: AUTH_LIMIT * 2, ttl: 60_000 } })
   @HttpCode(200)
   @Post('signing-token')
   signingToken(@Body(zodPipe(signingTokenRequestSchema)) body: unknown) {
