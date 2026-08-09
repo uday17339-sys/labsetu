@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { apiFetch } from '@/lib/api';
 import { Card, StatusPill, EmptyState } from '@/components/ui';
+import { FilterSubmit } from '@/components/filter-submit';
 
 export const dynamic = 'force-dynamic';
 
@@ -65,12 +66,7 @@ export default async function SamplesPage({
             autoComplete="off"
             className="numeric w-72 rounded-md border border-ink-300 px-3 py-2 text-sm focus:border-brand-500 focus:ring-2 focus:ring-brand-100"
           />
-          <button
-            type="submit"
-            className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
-          >
-            Find
-          </button>
+          <FilterSubmit label="Find" />
         </form>
       </div>
 

@@ -5,6 +5,7 @@ import { apiFetch } from '@/lib/api';
 import { getSessionUser, can } from '@/lib/session';
 import { Card, EmptyState } from '@/components/ui';
 import { dateTime } from '@/lib/format';
+import { FilterSubmit } from '@/components/filter-submit';
 
 export const dynamic = 'force-dynamic';
 
@@ -135,12 +136,7 @@ export default async function PatientsPage({
                 className="h-11 w-full rounded-md border border-ink-300 px-2 text-base sm:text-sm"
               />
             </label>
-            <button
-              type="submit"
-              className="mt-auto min-h-11 shrink-0 rounded-md bg-brand-600 px-4 text-sm font-medium text-white hover:bg-brand-700"
-            >
-              Search
-            </button>
+            <FilterSubmit label="Search" />
           </div>
         </form>
 

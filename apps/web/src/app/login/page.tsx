@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { apiLogin, ApiError } from '@/lib/api';
 import { setSession, type SessionUser } from '@/lib/session';
 import { DEMO, PITCH, SHOW_DEMO_ACCOUNTS } from '@/lib/vertical';
+import { SignInButton } from './submit-button';
 
 export const dynamic = 'force-dynamic';
 
@@ -201,12 +202,10 @@ export default async function LoginPage({
               />
             )}
 
-            <button
-              type="submit"
-              className="min-h-11 w-full rounded-md bg-brand-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2"
-            >
-              {mfaStep ? 'Verify' : 'Sign in'}
-            </button>
+            <SignInButton
+              label={mfaStep ? 'Verify' : 'Sign in'}
+              pendingLabel={mfaStep ? 'Verifying…' : 'Signing in…'}
+            />
           </form>
 
           {/*

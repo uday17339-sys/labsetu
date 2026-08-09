@@ -3,6 +3,7 @@ import { apiFetch } from '@/lib/api';
 import { getSessionUser, can } from '@/lib/session';
 import { Card, EmptyState, Stat, StatusPill } from '@/components/ui';
 import { date } from '@/lib/format';
+import { FilterSubmit } from '@/components/filter-submit';
 
 export const dynamic = 'force-dynamic';
 
@@ -93,12 +94,7 @@ export default async function SpecificationsPage({
               <option value="RETIRED">Retired</option>
             </select>
           </label>
-          <button
-            type="submit"
-            className="min-h-11 rounded-md bg-brand-600 px-4 text-sm font-medium text-white hover:bg-brand-700"
-          >
-            Apply
-          </button>
+          <FilterSubmit label="Apply" />
         </form>
 
         {specs.length === 0 ? (

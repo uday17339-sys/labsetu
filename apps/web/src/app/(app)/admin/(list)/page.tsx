@@ -5,7 +5,9 @@ import { apiFetch, ApiError } from '@/lib/api';
 import { getSessionUser, can } from '@/lib/session';
 import { Card, EmptyState, Stat, StatusPill } from '@/components/ui';
 import { dateTime } from '@/lib/format';
-import { CreateUserForm } from './forms';
+import { CreateUserForm } from '../forms';
+import { FilterSubmit } from '@/components/filter-submit';
+import { PendingButton } from '@/components/pending-button';
 
 export const dynamic = 'force-dynamic';
 
@@ -229,12 +231,7 @@ export default async function AdminPage({
                 <option value="LOCKED">Locked</option>
               </select>
             </label>
-            <button
-              type="submit"
-              className="min-h-11 rounded-md bg-brand-600 px-4 text-sm font-medium text-white hover:bg-brand-700"
-            >
-              Apply
-            </button>
+            <FilterSubmit label="Apply" />
           </form>
 
           {users.length === 0 ? (
@@ -354,12 +351,12 @@ function CredentialHandoff({
         </div>
       </dl>
       <form action={dismiss} className="mt-2">
-        <button
-          type="submit"
+        <PendingButton
           className="min-h-11 rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+          pendingChildren="Dismissing…"
         >
           I have noted it — dismiss
-        </button>
+        </PendingButton>
       </form>
     </div>
   );

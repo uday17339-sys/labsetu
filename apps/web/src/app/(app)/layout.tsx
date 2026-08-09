@@ -1,8 +1,11 @@
 import Link from 'next/link';
+import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { getSessionUser, clearSession, can } from '@/lib/session';
 import { NavLink, BottomNavLink, MoreMenu, MoreTab, type NavItem } from '@/components/nav';
 import { isPharma } from '@/lib/vertical';
+import { NavigationProgress } from '@/components/navigation-progress';
+import { PendingButton } from '@/components/pending-button';
 
 export const dynamic = 'force-dynamic';
 
@@ -142,6 +145,15 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="min-h-screen">
+      {/*
+        Suspense because it reads the query string, and useSearchParams opts the
+        subtree into client rendering. Without the boundary that would push the
+        whole layout — nav, header, every screen — out of static rendering.
+      */}
+      <Suspense fallback={null}>
+        <NavigationProgress />
+      </Suspense>
+
       <header className="no-print sticky top-0 z-30 border-b border-ink-200 bg-white">
         <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-4 px-3 sm:px-4">
           <Link href="/" className="flex min-h-11 shrink-0 items-center gap-2">
@@ -170,8 +182,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               </div>
             </div>
             <form action={signOut}>
-              <button
-                type="submit"
+              <PendingButton
                 aria-label="Sign out"
                 // 44px minimum touch target — the accessibility floor for a
                 // control someone taps with a gloved hand.
@@ -188,7 +199,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                 >
                   <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" />
                 </svg>
-              </button>
+              </PendingButton>
             </form>
           </div>
         </div>
