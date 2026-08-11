@@ -1,4 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@labsetu/db';
 import type { InstrumentMessageEnvelope, InstrumentObservation } from '@labsetu/contracts';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -343,6 +348,62 @@ export class IngestService {
    * heartbeat every few minutes, and anything longer means the gateway, the
    * serial cable or the instrument itself has stopped.
    */
+  /**
+   * Records a calibration against an instrument and moves its due date.
+   *
+   * The gate on authorisation is only defensible if there is a way through it
+   * that is not "turn the check off". This is that way: the engineer records
+   * what was done, against which certificate, and when it next falls due.
+   *
+   * Audited as its own verb. A calibration date moving is exactly the kind of
+   * change an investigator wants attributed — "who extended this, and on what
+   * evidence" is the question after a batch is queried.
+   */
+  async recordCalibration(
+    deviceId: string,
+    input: { performedAt: Date; nextDueAt: Date; certificateRef: string; note?: string },
+  ) {
+    const tx = this.prisma.tx;
+
+    const device = await tx.device.findUnique({
+      where: { id: deviceId },
+      select: { id: true, code: true, name: true, calibrationDueAt: true },
+    });
+    if (!device) throw new NotFoundException('Instrument not found');
+
+    if (input.nextDueAt <= input.performedAt) {
+      throw new BadRequestException(
+        'The next calibration is due before the calibration was performed. Check the dates.',
+      );
+    }
+
+    const updated = await tx.device.update({
+      where: { id: deviceId },
+      data: { calibrationDueAt: input.nextDueAt },
+    });
+
+    await this.audit.record(tx, {
+      action: 'CALIBRATION_RECORDED',
+      entityType: 'Device',
+      entityId: deviceId,
+      before: { calibrationDueAt: device.calibrationDueAt?.toISOString() ?? null },
+      after: {
+        code: device.code,
+        performedAt: input.performedAt.toISOString(),
+        calibrationDueAt: updated.calibrationDueAt?.toISOString() ?? null,
+        certificateRef: input.certificateRef,
+      },
+      reason: input.note ?? `Calibration recorded against ${input.certificateRef}`,
+    });
+
+    return {
+      id: updated.id,
+      code: device.code,
+      calibrationDueAt: updated.calibrationDueAt?.toISOString().slice(0, 10) ?? null,
+      isOutOfCalibration: false,
+    };
+  }
+
   async listDevices() {
     const devices = await this.prisma.tx.device.findMany({
       orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
@@ -388,6 +449,15 @@ export class IngestService {
         : null,
       isOnline: !!d.lastMessageAt && now - d.lastMessageAt.getTime() < staleAfterMs,
       openExceptions: exceptionsByDevice.get(d.id) ?? 0,
+      /// Calibration is a hard gate on authorisation, so the screen has to show
+      /// it before someone runs a day's work on an instrument that cannot sign
+      /// anything off. "Due in 9 days" is actionable; discovering it at the
+      /// point of authorisation is not.
+      calibrationDueAt: d.calibrationDueAt?.toISOString().slice(0, 10) ?? null,
+      calibrationDueInDays: d.calibrationDueAt
+        ? Math.ceil((d.calibrationDueAt.getTime() - now) / 864e5)
+        : null,
+      isOutOfCalibration: !!d.calibrationDueAt && d.calibrationDueAt.getTime() < now,
     }));
   }
 

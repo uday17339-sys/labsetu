@@ -27,9 +27,10 @@ Scored as a compliance lead would score it: **68/100**.
 | Functional GMP coverage | 12/25 | The laboratory is built. The quality system around it is not — see §3 |
 | Computer System Validation | 0/15 | No URS, no risk assessment, no IQ/OQ/PQ, no traceability matrix. This is the first thing an inspector asks for |
 
-**The two defects that would cost most in a demo**, both cheap to fix, are in P0
-below: the certificate does not manifest its signature, and instrument
-calibration status is recorded but never enforced.
+**Both P0 defects that would have cost most in a demo are now closed** — the
+certificate manifests its signature, and calibration is enforced rather than
+recorded. The score above is the starting position, not the current one; it is
+re-scored when P0 and P1 are complete.
 
 ---
 
@@ -77,7 +78,7 @@ Ordered by what a plant and an inspector actually need, not by what is easy.
 | # | Item | Why it matters | State |
 |---|---|---|---|
 | 0.1 | **Signature manifestation on the CoA** | 21 CFR §11.50 requires the printed name of the signer, the date and time of signing, and the meaning to appear on the signed record | ✅ **Done** — certificate now shows signer, qualification, registration number, signing time and meaning; a release without a signature says so explicitly rather than leaving a blank. Five assertions in `pharma-verify` |
-| 0.2 | **Enforce instrument calibration** | `calibrationDueAt` exists on the device and is read by nothing. An instrument past calibration can produce results that get authorised. Using uncalibrated equipment invalidates the data — a standard inspection finding | ☐ To do |
+| 0.2 | **Enforce instrument calibration** | Data produced on uncalibrated equipment is not defensible | ✅ **Done** — authorisation refused for a result produced on an instrument past its calibration date; `POST /ingest/devices/:id/calibration` records a calibration against a mandatory certificate reference and is audited as `CALIBRATION_RECORDED`; due date and days-remaining exposed on the instrument list. Nine assertions in `qc-verify`, including that the gate reopens on evidence rather than on a switch |
 | 0.3 | **Password aging, reuse history, access review** | §11.300 expects periodic password change, reuse prevention, and periodic review of who holds what | ☐ To do |
 
 ### P1 — The quality system the laboratory hangs off

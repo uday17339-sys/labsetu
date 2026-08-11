@@ -281,7 +281,10 @@ export class ResultsService {
     // 3 — QC gate
     await this.assertQcPassing(test);
 
-    // 4 — signature over the exact content being authorised
+    // 4 — the instrument was in calibration when the work was done
+    await this.assertInstrumentCalibrated(test);
+
+    // 5 — signature over the exact content being authorised
     const contentHash = await this.contentHash(sampleTestId);
     const signature = await this.auth.consumeSigningToken(signingToken, {
       entityType: 'SampleTest',
@@ -554,6 +557,49 @@ export class ResultsService {
       throw new ForbiddenException(
         `Quality control has failed for ${codes} on this analyzer and has not been resolved. ` +
           `Resolve the QC failure, or record a documented override, before authorising patient results.`,
+      );
+    }
+  }
+
+  /**
+   * Refuses to authorise a result produced on an instrument that is out of
+   * calibration.
+   *
+   * The due date has been on the device record since the beginning and was read
+   * by nothing, which is worse than not having it: the field looks like a
+   * control and behaves like a comment. Data generated on uncalibrated
+   * equipment is not defensible — an inspector who finds an assay authorised
+   * three weeks after the HPLC's calibration lapsed will discard the batch
+   * record, and rightly.
+   *
+   * Checked at AUTHORISATION rather than at result entry on purpose. Entry is
+   * the bench recording what happened; authorisation is the assertion that the
+   * result can be relied upon, and that is the claim calibration underwrites.
+   * Blocking entry would also strand results that were legitimately generated
+   * before the due date passed.
+   *
+   * Governed by a policy key so a site can stage the control while it gets its
+   * calibration records into the system, but it defaults ON: a plant that has
+   * not configured anything gets the safe behaviour.
+   */
+  private async assertInstrumentCalibrated(test: {
+    deviceId: string | null;
+  }): Promise<void> {
+    const enabled = await this.policy('instrument.blockAuthorizationWhenOutOfCalibration', true);
+    if (!enabled || !test.deviceId) return;
+
+    const device = await this.prisma.tx.device.findUnique({
+      where: { id: test.deviceId },
+      select: { code: true, name: true, calibrationDueAt: true },
+    });
+    if (!device?.calibrationDueAt) return;
+
+    if (device.calibrationDueAt < new Date()) {
+      const due = device.calibrationDueAt.toISOString().slice(0, 10);
+      throw new ForbiddenException(
+        `${device.code} was out of calibration on ${due}. Results produced on it cannot be ` +
+          `authorised until the instrument is recalibrated and the due date updated. ` +
+          `If the calibration was performed, record it against the instrument first.`,
       );
     }
   }

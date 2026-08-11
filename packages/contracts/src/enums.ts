@@ -159,6 +159,10 @@ export const AUDIT_ACTION = [
   'ERASURE_EXECUTED',
   'DEVICE_ENROLLED',
   'DEVICE_REVOKED',
+  /// A calibration due date moved. Its own verb because "who extended this, and
+  /// on what certificate" is the first question asked when a batch produced on
+  /// that instrument is queried.
+  'CALIBRATION_RECORDED',
   'INGEST_RECEIVED',
   'POLICY_CHANGED',
 ] as const;

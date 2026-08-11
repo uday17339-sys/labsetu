@@ -406,6 +406,178 @@ async function main() {
         `${allowedAttempt.status} ${JSON.stringify(allowedAttempt.body).slice(0, 110)}`,
       );
 
+
+  // ------------------------------------------------- calibration gate
+  section('The calibration gate');
+
+  // Mirrors the QC gate above and shares its shape: a result produced on an
+  // instrument that is out of calibration must not be authorisable. The due
+  // date sat on the device record from the beginning and was read by nothing,
+  // which is worse than absent — the field looked like a control and behaved
+  // like a comment.
+  //
+  // Reuses the analyzer-bound test already built for the QC gate, so this is
+  // testing the calibration check and not a fresh set of plumbing.
+  const calBefore = await api('GET', '/ingest/devices', { token: admin.accessToken });
+  const chemBefore = (calBefore.body ?? []).find((d) => d.code === 'CHEM-01');
+  chemBefore?.calibrationDueAt
+    ? ok('the instrument list shows calibration status', `due ${chemBefore.calibrationDueAt}`)
+    : bad('calibration surfaced on the device list', 'no due date exposed');
+
+  // Back-date the instrument so it is out of calibration right now.
+  const lapse = await api('POST', `/ingest/devices/${chemDeviceId}/calibration`, {
+    token: admin.accessToken,
+    body: {
+      performedAt: new Date(Date.now() - 400 * 864e5).toISOString().slice(0, 10),
+      nextDueAt: new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10),
+      certificateRef: 'CAL/VERIFY/LAPSED',
+      note: 'Verification run — driving the instrument out of calibration on purpose',
+    },
+  });
+  lapse.status < 300
+    ? ok('a calibration can be recorded against the instrument', 'due date moved')
+    : bad('record calibration', `${lapse.status} ${JSON.stringify(lapse.body).slice(0, 120)}`);
+
+  const outOfCal = await api('GET', '/ingest/devices', { token: admin.accessToken });
+  (outOfCal.body ?? []).find((d) => d.code === 'CHEM-01')?.isOutOfCalibration === true
+    ? ok('the instrument reads as out of calibration', 'flagged before anyone runs work on it')
+    : bad('out-of-calibration flag', 'not reflected on the device list');
+
+  // A fresh analyzer-bound test. The one built for the QC gate has already been
+  // authorised, and a record cannot be authorised twice — reusing it would test
+  // the state machine rather than the calibration check.
+  const calReceipt = await api('POST', '/stores/receive', {
+    token: stores.accessToken,
+    body: {
+      labId,
+      supplierName: 'Calibration Gate Supplier',
+      batches: [
+        {
+          materialId: material.id,
+          batchNumber: `CALG-${Date.now()}`,
+          quantity: 40,
+          containerCount: 2,
+          manufacturedAt: new Date(Date.now() - 10 * 864e5).toISOString().slice(0, 10),
+          expiryDate: new Date(Date.now() + 500 * 864e5).toISOString().slice(0, 10),
+        },
+      ],
+    },
+  });
+  const calReq = await api('POST', '/stores/sampling-requests', {
+    token: stores.accessToken,
+    body: { batchId: calReceipt.body.batches[0].id, reason: 'RELEASE_TESTING' },
+  });
+  const calSampled = await api('POST', `/stores/sampling-requests/${calReq.body.id}/sample`, {
+    token: tech.accessToken,
+    body: { labId, containersSampled: 2 },
+  });
+  const calAccession = calSampled.body.accessionNumber;
+  const calSample = await api('GET', `/samples/by-accession/${calAccession}`, {
+    token: tech.accessToken,
+  });
+
+  await devicePost(creds, '/v1/ingest/messages', {
+    messageId: randomUUID(),
+    deviceId: creds.deviceId,
+    protocol: 'FILE_CSV',
+    capturedAt: new Date().toISOString(),
+    rawChecksum: createHash('sha256').update(calAccession).digest('hex'),
+    observations: [
+      {
+        specimenRef: calAccession,
+        testCode: 'ASSAY',
+        value: '99.55',
+        units: '%',
+        resultStatus: 'FINAL',
+        rerunCount: 0,
+        isQc: false,
+        rawFields: {},
+      },
+    ],
+  });
+
+  let calTestId = null;
+  for (const t of calSample.body.tests ?? []) {
+    const d = await api('GET', `/tests/${t.id}`, { token: tech.accessToken });
+    if (d.body?.testDefinition?.code === 'TASSAY') {
+      calTestId = t.id;
+      break;
+    }
+  }
+  await api('POST', `/tests/${calTestId}/verify`, { token: tech.accessToken, body: {} });
+
+  const calBound = await api('GET', `/tests/${calTestId}`, { token: patho.accessToken });
+  calBound.body?.device?.code === 'CHEM-01'
+    ? ok('a second assay is bound to the same analyzer', 'ready for the calibration check')
+    : bad('analyzer-bound test built', `device=${calBound.body?.device?.code}`);
+
+  const tryCalAuth = async () => {
+    const h = await api('GET', `/tests/${calTestId}/content-hash`, { token: patho.accessToken });
+    const tok = await api('POST', '/auth/signing-token', {
+      token: patho.accessToken,
+      body: {
+        password: PASSWORD,
+        entityType: 'SampleTest',
+        entityId: calTestId,
+        meaning: 'AUTHORIZED',
+        contentHash: h.body.contentHash,
+      },
+    });
+    return api('POST', `/tests/${calTestId}/authorize`, {
+      token: patho.accessToken,
+      body: { signingToken: tok.body.signingToken, meaning: 'AUTHORIZED' },
+    });
+  };
+
+  const blockedByCal = await tryCalAuth();
+  blockedByCal.status === 403 && /calibration/i.test(blockedByCal.body?.detail ?? '')
+    ? ok('authorisation BLOCKED by the lapsed calibration', String(blockedByCal.body.detail).slice(0, 66))
+    : bad(
+        'calibration gate blocks authorisation',
+        `${blockedByCal.status}: ${String(blockedByCal.body?.detail).slice(0, 100)}`,
+      );
+
+  // And the way out is recording the calibration, not disabling the check.
+  const recalibrated = await api('POST', `/ingest/devices/${chemDeviceId}/calibration`, {
+    token: admin.accessToken,
+    body: {
+      performedAt: new Date().toISOString().slice(0, 10),
+      nextDueAt: new Date(Date.now() + 180 * 864e5).toISOString().slice(0, 10),
+      certificateRef: 'CAL/2026/CHEM-01/014',
+      note: 'Annual calibration by the service engineer; certificate on file.',
+    },
+  });
+  recalibrated.status < 300
+    ? ok('recalibration recorded with a certificate reference')
+    : bad('recalibrate', `${recalibrated.status}`);
+
+  const allowedAfterCal = await tryCalAuth();
+  allowedAfterCal.body?.status === 'AUTHORIZED'
+    ? ok('recalibrating unblocks authorisation', 'the gate opens on evidence, not on a switch')
+    : bad(
+        'gate reopens after recalibration',
+        `${allowedAfterCal.status} ${JSON.stringify(allowedAfterCal.body).slice(0, 110)}`,
+      );
+
+  const noCert = await api('POST', `/ingest/devices/${chemDeviceId}/calibration`, {
+    token: admin.accessToken,
+    body: {
+      performedAt: new Date().toISOString().slice(0, 10),
+      nextDueAt: new Date(Date.now() + 180 * 864e5).toISOString().slice(0, 10),
+      certificateRef: '',
+    },
+  });
+  noCert.status >= 400
+    ? ok('a calibration without a certificate reference is refused', 'the evidence is the point')
+    : bad('certificate reference required', `${noCert.status}`);
+
+  const calAudit = await api('GET', '/compliance/audit?action=CALIBRATION_RECORDED&limit=5', {
+    token: admin.accessToken,
+  });
+  (calAudit.body?.items ?? []).length > 0
+    ? ok('calibration changes are audited as their own verb', 'CALIBRATION_RECORDED')
+    : bad('calibration audited', JSON.stringify(calAudit.body).slice(0, 120));
+
   // ----------------------------------------------------- documented override
   section('Resolving a failure');
 

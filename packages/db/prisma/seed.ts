@@ -866,6 +866,9 @@ async function main() {
         protocol: string;
         location: string;
         shadow?: boolean;
+        /// Days until calibration falls due. Every instrument in a GMP lab has
+        /// one; authorisation is refused on an instrument past it.
+        calibrationDueIn?: number;
         channels: [string, string][];
       }) => {
         const dev = await tx.device.create({
@@ -880,6 +883,8 @@ async function main() {
             department: data.department as never,
             protocol: data.protocol as never,
             location: data.location,
+            calibrationDueAt:
+              data.calibrationDueIn === undefined ? null : daysAhead(data.calibrationDueIn),
             status: data.shadow ? 'ENROLLED' : 'ACTIVE',
             isShadowMode: data.shadow ?? false,
             enrolmentCode: `DEMO-${data.code}-0001`,
@@ -913,6 +918,8 @@ async function main() {
         // vendor has never stood in an instrument room.
         protocol: 'FILE_CSV',
         location: 'Instrument Room 1',
+        // Comfortably in date. The demo should open on a lab that is in order.
+        calibrationDueIn: 128,
         channels: [
           ['ASSAY', 'ASSAY'],
           ['RS_TOTAL', 'RSUB'],
@@ -943,6 +950,9 @@ async function main() {
         department: 'INSTRUMENTATION',
         protocol: 'FILE_CSV',
         location: 'Dissolution Lab',
+        // Due in three weeks: the stores screen shows something worth acting on
+        // without anything being wrong yet.
+        calibrationDueIn: 21,
         channels: [['DISS', 'DISS']],
       });
       await mkDevice({

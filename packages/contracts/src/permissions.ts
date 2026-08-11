@@ -157,11 +157,6 @@ export const UNIMPLEMENTED_PERMISSIONS: readonly Permission[] = [
   PERMISSIONS.POLICY_MANAGE,
 
   // --- instrument administration (Phase 2) ---
-  // Devices are enrolled through the on-prem gateway (DEVICE_ENROL), which is
-  // built and tested. What is absent is a browser screen to rename, retire or
-  // re-map a channel after enrolment.
-  PERMISSIONS.DEVICE_MANAGE,
-
   // --- workflow actions not yet exposed ---
   PERMISSIONS.ORDER_UPDATE,
   PERMISSIONS.ORDER_CANCEL,

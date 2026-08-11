@@ -30,6 +30,7 @@ import { TenantKeyService } from '../../common/crypto/tenant-key.service';
 import { DeviceAuth, Public, RequirePermissions } from '../../common/rbac/permissions.decorator';
 import { zodPipe } from '../../common/pipes/zod-validation.pipe';
 import { RequestContextStore } from '../../common/context/request-context';
+import { z } from 'zod';
 
 @Injectable()
 class DeviceEnrolmentService {
@@ -143,6 +144,15 @@ class DeviceEnrolmentService {
   }
 }
 
+const calibrationSchema = z.object({
+  performedAt: z.string().min(8),
+  nextDueAt: z.string().min(8),
+  /// Not optional. A calibration with no certificate behind it is a claim, and
+  /// this record is what an inspector is shown when they ask for the evidence.
+  certificateRef: z.string().trim().min(2).max(120),
+  note: z.string().trim().max(500).optional(),
+});
+
 @Controller({ path: 'ingest', version: '1' })
 class IngestController {
   constructor(
@@ -194,6 +204,25 @@ class IngestController {
   @Get('devices')
   devices() {
     return this.ingest.listDevices();
+  }
+
+  /**
+   * Recording a calibration is a device-management action, not an enrolment
+   * one: the engineer who calibrates an HPLC is not the person who provisions
+   * gateway credentials for it.
+   */
+  @RequirePermissions(PERMISSIONS.DEVICE_MANAGE)
+  @Post('devices/:id/calibration')
+  recordCalibration(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(zodPipe(calibrationSchema)) body: z.infer<typeof calibrationSchema>,
+  ) {
+    return this.ingest.recordCalibration(id, {
+      performedAt: new Date(body.performedAt),
+      nextDueAt: new Date(body.nextDueAt),
+      certificateRef: body.certificateRef,
+      note: body.note,
+    });
   }
 
   @RequirePermissions(PERMISSIONS.DEVICE_ENROL)
