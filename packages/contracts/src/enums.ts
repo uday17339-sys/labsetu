@@ -163,6 +163,10 @@ export const AUDIT_ACTION = [
   /// on what certificate" is the first question asked when a batch produced on
   /// that instrument is queried.
   'CALIBRATION_RECORDED',
+  /// A password aged past its maximum life and the holder was forced to change
+  /// it. Recorded so the control is visibly operating, not merely configured.
+  'PASSWORD_EXPIRED',
+  'ACCESS_REVIEWED',
   'INGEST_RECEIVED',
   'POLICY_CHANGED',
 ] as const;

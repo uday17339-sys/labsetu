@@ -732,6 +732,109 @@ devices.body?.every?.((d) => typeof d.isOnline === 'boolean')
   : bad('online derivation', 'isOnline missing');
 
 // ===========================================================================
+section('Password lifecycle and access review (21 CFR 11.300)');
+
+// A fresh account to exercise the password rules against, so the run does not
+// depend on the history of a seeded user.
+const pwEmail = `pwtest.${uniq()}@vantage.test`;
+const pwUser = await api('POST', '/admin/users', {
+  token: admin.accessToken,
+  body: { email: pwEmail, fullName: 'Password Policy Test', roleIds: [analystRole.id] },
+});
+const tempPassword = pwUser.body?.temporaryPassword;
+tempPassword
+  ? ok('a temporary password is issued for the new account', `${tempPassword.length} chars`)
+  : bad('temp password issued', JSON.stringify(pwUser.body).slice(0, 110));
+
+const pwSession = await api('POST', '/auth/login', {
+  body: { tenantCode: TENANT, email: pwEmail, password: tempPassword },
+});
+pwSession.body?.user?.mustChangePassword === true
+  ? ok('a new account must change its password before working', 'first sign-in is gated')
+  : bad('first sign-in gated', `mustChangePassword=${pwSession.body?.user?.mustChangePassword}`);
+
+const firstNew = `Vantage#First${uniq()}`;
+const changed = await api('POST', '/auth/password', {
+  token: pwSession.body.accessToken,
+  body: { currentPassword: tempPassword, newPassword: firstNew, confirmPassword: firstNew },
+});
+changed.status < 300
+  ? ok('the password can be changed')
+  : bad('password change', `${changed.status} ${JSON.stringify(changed.body).slice(0, 110)}`);
+
+// THE CONTROL: §11.300(b) — a change must not cycle back to a recent password.
+const reSession = await api('POST', '/auth/login', {
+  body: { tenantCode: TENANT, email: pwEmail, password: firstNew },
+});
+const reuseOld = await api('POST', '/auth/password', {
+  token: reSession.body.accessToken,
+  body: { currentPassword: firstNew, newPassword: tempPassword, confirmPassword: tempPassword },
+});
+reuseOld.status >= 400 && /used before|last/i.test(reuseOld.body?.detail ?? '')
+  ? ok('reusing a previous password is REFUSED', String(reuseOld.body.detail).slice(0, 60))
+  : bad('password reuse refused', `${reuseOld.status} ${JSON.stringify(reuseOld.body).slice(0, 110)}`);
+
+// Re-entering the CURRENT password is the commonest "change" and must also fail.
+const reuseCurrent = await api('POST', '/auth/password', {
+  token: reSession.body.accessToken,
+  body: { currentPassword: firstNew, newPassword: firstNew, confirmPassword: firstNew },
+});
+reuseCurrent.status >= 400
+  ? ok('re-entering the current password is REFUSED', 'a change has to change something')
+  : bad('current password reuse refused', `${reuseCurrent.status}`);
+
+// --- access review --------------------------------------------------------
+const reviewState = await api('GET', '/admin/access-review', { token: admin.accessToken });
+reviewState.status === 200
+  ? ok('the access review register is reachable', `interval ${reviewState.body.intervalDays} days`)
+  : bad('access review register', `${reviewState.status}`);
+
+typeof reviewState.body?.isOverdue === 'boolean'
+  ? ok('the system states whether a review is overdue', `overdue=${reviewState.body.isOverdue}`)
+  : bad('overdue computed', JSON.stringify(reviewState.body).slice(0, 110));
+
+const thinReview = await api('POST', '/admin/access-review', {
+  token: admin.accessToken,
+  body: { note: 'Reviewed' },
+});
+thinReview.status >= 400
+  ? ok('a one-word access review is REFUSED', 'an assessor reads the note, not the timestamp')
+  : bad('review note substantive', `${thinReview.status}`);
+
+const realReview = await api('POST', '/admin/access-review', {
+  token: admin.accessToken,
+  body: {
+    note:
+      'Quarterly review of all active accounts against the current org chart. Checked role ' +
+      'assignments, competency currency and MFA status for every privileged holder.',
+    actions: 'Deactivated one leaver; removed QA disposition rights from a transferred analyst.',
+  },
+});
+realReview.status < 300 && realReview.body?.userCount > 0
+  ? ok('a documented access review is recorded', `${realReview.body.userCount} accounts in scope`)
+  : bad('access review recorded', `${realReview.status} ${JSON.stringify(realReview.body).slice(0, 110)}`);
+
+const afterReview = await api('GET', '/admin/access-review', { token: admin.accessToken });
+afterReview.body?.isOverdue === false && afterReview.body?.nextDueAt
+  ? ok('recording a review clears the overdue state', `next due ${afterReview.body.nextDueAt.slice(0, 10)}`)
+  : bad('overdue cleared', JSON.stringify(afterReview.body).slice(0, 120));
+
+const reviewAudit = await api('GET', '/compliance/audit?action=ACCESS_REVIEWED&limit=5', {
+  token: admin.accessToken,
+});
+(reviewAudit.body?.items ?? []).length > 0
+  ? ok('the review is audited as its own verb', 'ACCESS_REVIEWED')
+  : bad('review audited', JSON.stringify(reviewAudit.body).slice(0, 110));
+
+const techReview = await api('POST', '/admin/access-review', {
+  token: tech.accessToken,
+  body: { note: 'An analyst should not be able to sign off on who holds what access.' },
+});
+techReview.status === 403
+  ? ok('the bench cannot sign off an access review', '403 — needs user:manage')
+  : bad('access review permissioned', `${techReview.status}`);
+
+// ===========================================================================
 console.log(
   `\n\x1b[1m${passed} passed, ${failures.length} failed\x1b[0m`,
 );

@@ -22,7 +22,7 @@ Scored as a compliance lead would score it: **68/100**.
 | Area | Score | Why |
 |---|---|---|
 | Data integrity / ALCOA+ | 18/20 | Hash-chained append-only audit, server-assigned time, RLS failing closed, `UPDATE`/`DELETE` refused by database grant rather than by application code |
-| Access control & segregation of duties | 16/20 | QC cannot release, QA cannot enter results, four-eyes on authorisation, competency enforced as a gate. Missing: password aging, reuse history, periodic access review |
+| Access control & segregation of duties | 19/20 | QC cannot release, QA cannot enter results, four-eyes on authorisation, competency enforced as a gate, password aging and reuse prevention, periodic access review with an overdue state |
 | Core QC workflow | 15/20 | Receipt → quarantine → sampling → AR → result → verify → authorise → disposition → CoA, correctly gated. Auto-OOS blocks release; critical excursions cannot be dispositioned around |
 | Functional GMP coverage | 12/25 | The laboratory is built. The quality system around it is not — see §3 |
 | Computer System Validation | 0/15 | No URS, no risk assessment, no IQ/OQ/PQ, no traceability matrix. This is the first thing an inspector asks for |
@@ -79,7 +79,7 @@ Ordered by what a plant and an inspector actually need, not by what is easy.
 |---|---|---|---|
 | 0.1 | **Signature manifestation on the CoA** | 21 CFR §11.50 requires the printed name of the signer, the date and time of signing, and the meaning to appear on the signed record | ✅ **Done** — certificate now shows signer, qualification, registration number, signing time and meaning; a release without a signature says so explicitly rather than leaving a blank. Five assertions in `pharma-verify` |
 | 0.2 | **Enforce instrument calibration** | Data produced on uncalibrated equipment is not defensible | ✅ **Done** — authorisation refused for a result produced on an instrument past its calibration date; `POST /ingest/devices/:id/calibration` records a calibration against a mandatory certificate reference and is audited as `CALIBRATION_RECORDED`; due date and days-remaining exposed on the instrument list. Nine assertions in `qc-verify`, including that the gate reopens on evidence rather than on a switch |
-| 0.3 | **Password aging, reuse history, access review** | §11.300 expects periodic password change, reuse prevention, and periodic review of who holds what | ☐ To do |
+| 0.3 | **Password aging, reuse history, access review** | §11.300 expects periodic password change, reuse prevention, and periodic review of who holds what | ✅ **Done** — passwords age out (`password.maxAgeDays`, default 90) and force a change at next sign-in rather than stranding someone mid-shift; reuse of the last N is refused (`password.historyCount`, default 5) including re-entering the current one; `POST /admin/access-review` records a documented review with the account count in scope, computes overdue against `access.reviewIntervalDays`, and is audited as `ACCESS_REVIEWED`. Thirteen assertions in `admin-verify` |
 
 ### P1 — The quality system the laboratory hangs off
 

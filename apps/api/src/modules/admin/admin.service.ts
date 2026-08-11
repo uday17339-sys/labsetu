@@ -582,4 +582,93 @@ export class AdminService {
       counts: { live: live.length, expiring: expiring.length, expired: expired.length },
     };
   }
+
+  /**
+   * The periodic access review.
+   *
+   * §11.300(a) expects access to be reviewed, not merely granted correctly
+   * once. People change roles, cover for absences and leave; the permission set
+   * that was right in January is the finding in December.
+   *
+   * The record is the point. Without one an inspector sees only the current
+   * state and has no way to know whether anybody has ever questioned it, so a
+   * note describing what was checked is mandatory rather than optional.
+   */
+  async recordAccessReview(input: { note: string; actions?: string }) {
+    const ctx = RequestContextStore.require();
+    const tx = this.prisma.tx;
+
+    const userCount = await tx.user.count({ where: { status: 'ACTIVE' } });
+
+    const review = await tx.accessReview.create({
+      data: {
+        tenantId: ctx.tenantId!,
+        reviewedBy: ctx.userId!,
+        userCount,
+        note: input.note.trim(),
+        actions: input.actions?.trim() || null,
+      },
+    });
+
+    await this.audit.record(tx, {
+      action: 'ACCESS_REVIEWED',
+      entityType: 'AccessReview',
+      entityId: review.id,
+      after: { userCount, actions: review.actions },
+      reason: review.note,
+    });
+
+    return {
+      id: review.id,
+      reviewedAt: review.reviewedAt.toISOString(),
+      userCount,
+    };
+  }
+
+  /**
+   * The review history, and whether one is overdue.
+   *
+   * "Overdue" is computed rather than stored: the interval is a policy a site
+   * can set, and a stored flag would go stale the moment it changed.
+   */
+  async listAccessReviews() {
+    const tx = this.prisma.tx;
+
+    const rows = await tx.accessReview.findMany({
+      orderBy: { reviewedAt: 'desc' },
+      take: 50,
+    });
+
+    const intervalRow = await tx.tenantPolicy.findFirst({
+      where: { key: 'access.reviewIntervalDays' },
+    });
+    const intervalDays = (intervalRow?.value as number) ?? 180;
+
+    const reviewers = await tx.user.findMany({
+      where: { id: { in: rows.map((r) => r.reviewedBy) } },
+      select: { id: true, fullName: true },
+    });
+    const nameById = new Map(reviewers.map((u) => [u.id, u.fullName]));
+
+    const last = rows[0] ?? null;
+    const dueAt = last ? new Date(last.reviewedAt.getTime() + intervalDays * 864e5) : null;
+
+    return {
+      intervalDays,
+      lastReviewedAt: last?.reviewedAt.toISOString() ?? null,
+      nextDueAt: dueAt?.toISOString() ?? null,
+      /// No review on record counts as overdue. A system that has never been
+      /// reviewed is not compliant by virtue of being new.
+      isOverdue: !last || dueAt!.getTime() < Date.now(),
+      items: rows.map((r) => ({
+        id: r.id,
+        reviewedAt: r.reviewedAt.toISOString(),
+        reviewedBy: nameById.get(r.reviewedBy) ?? 'Unknown',
+        userCount: r.userCount,
+        note: r.note,
+        actions: r.actions,
+      })),
+    };
+  }
+
 }

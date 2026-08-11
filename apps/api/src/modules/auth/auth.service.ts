@@ -17,6 +17,7 @@ import { CryptoService } from '../../common/crypto/crypto.service';
 import { TenantKeyService } from '../../common/crypto/tenant-key.service';
 import { RequestContextStore } from '../../common/context/request-context';
 import { CONFIG, type AppConfig } from '../../config/configuration';
+import { Prisma } from '@labsetu/db';
 
 const MAX_FAILED_LOGINS = 5;
 const LOCK_MINUTES = 15;
@@ -180,6 +181,31 @@ export class AuthService {
         after: { mfaUsed: user.isMfaEnabled },
       });
 
+      // §11.300(b): passwords age out. Rather than refusing the sign-in — which
+      // strands someone mid-shift with no way to fix it — the session is issued
+      // and flagged as requiring a change, which is the same path a first
+      // sign-in already takes. The client cannot ignore it: every screen behind
+      // the change-password gate checks the same flag.
+      const maxAgeDays = await this.policy(tx, 'password.maxAgeDays', 90);
+      const passwordExpired =
+        maxAgeDays > 0 &&
+        Date.now() - user.passwordChangedAt.getTime() > maxAgeDays * 864e5;
+
+      if (passwordExpired) {
+        await this.audit.record(tx, {
+          tenantId: tenant.id,
+          action: 'PASSWORD_EXPIRED',
+          entityType: 'User',
+          entityId: user.id,
+          actorUserId: user.id,
+          actorDisplay: user.fullName,
+          after: {
+            passwordChangedAt: user.passwordChangedAt.toISOString(),
+            maxAgeDays,
+          },
+        });
+      }
+
       return {
         kind: 'OK' as const,
         response: {
@@ -198,7 +224,7 @@ export class AuthService {
             roles: roleCodes,
             labs,
             isMfaEnabled: user.isMfaEnabled,
-            mustChangePassword: user.mustChangePassword,
+            mustChangePassword: user.mustChangePassword || passwordExpired,
             locale: user.locale,
           },
         },
@@ -608,6 +634,22 @@ export class AuthService {
     });
   }
 
+  /**
+   * A tenant policy value with a safe default.
+   *
+   * Takes the transaction explicitly because login runs inside one before a
+   * request context exists — the usual `this.prisma.tx` accessor is not
+   * available that early.
+   */
+  private async policy<T>(
+    tx: Prisma.TransactionClient,
+    key: string,
+    fallback: T,
+  ): Promise<T> {
+    const row = await tx.tenantPolicy.findFirst({ where: { key } });
+    return row ? (row.value as T) : fallback;
+  }
+
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
     const ctx = RequestContextStore.require();
     const user = await this.prisma.tx.user.findUniqueOrThrow({ where: { id: ctx.userId! } });
@@ -615,6 +657,38 @@ export class AuthService {
     if (!(await verifyPassword(user.passwordHash, currentPassword))) {
       throw new UnauthorizedException('Current password is incorrect');
     }
+
+    // §11.300(b): a password change must not cycle back to a recent one.
+    // Checked against the stored history AND the current password, because the
+    // commonest "change" is re-entering the same one.
+    const historyCount = await this.policy(this.prisma.tx, 'password.historyCount', 5);
+    if (historyCount > 0) {
+      const recent = await this.prisma.tx.passwordHistory.findMany({
+        where: { userId: user.id },
+        orderBy: { changedAt: 'desc' },
+        take: historyCount,
+        select: { passwordHash: true },
+      });
+
+      const previous = [user.passwordHash, ...recent.map((r) => r.passwordHash)];
+      for (const hash of previous) {
+        if (await verifyPassword(hash, newPassword)) {
+          throw new BadRequestException(
+            `This password has been used before. Choose one that is not among your last ` +
+              `${historyCount} passwords.`,
+          );
+        }
+      }
+    }
+
+    // The outgoing password joins the history before it is replaced.
+    await this.prisma.tx.passwordHistory.create({
+      data: {
+        tenantId: ctx.tenantId!,
+        userId: user.id,
+        passwordHash: user.passwordHash,
+      },
+    });
 
     await this.prisma.tx.user.update({
       where: { id: user.id },

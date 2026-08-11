@@ -54,6 +54,15 @@ const grantCompetencySchema = z.object({
 
 const reasonBody = z.object({ reason: reasonSchema });
 
+const accessReviewSchema = z.object({
+  /// Required, and long enough to say something. "Reviewed" is not a review.
+  note: z
+    .string()
+    .trim()
+    .min(20, 'Describe what was checked — an assessor reads this, not the timestamp'),
+  actions: z.string().trim().max(2000).optional(),
+});
+
 @Controller({ path: 'admin', version: '1' })
 class AdminController {
   constructor(private readonly admin: AdminService) {}
@@ -66,6 +75,22 @@ class AdminController {
     @Query('role') roleCode?: string,
   ) {
     return this.admin.listUsers({ status, search, roleCode });
+  }
+
+  /**
+   * Periodic access review — §11.300(a). USER_MANAGE rather than USER_READ:
+   * recording that access was reviewed is an assertion, not a lookup.
+   */
+  @RequirePermissions(PERMISSIONS.USER_MANAGE)
+  @Post('access-review')
+  recordAccessReview(@Body(zodPipe(accessReviewSchema)) body: z.infer<typeof accessReviewSchema>) {
+    return this.admin.recordAccessReview(body);
+  }
+
+  @RequirePermissions(PERMISSIONS.USER_READ)
+  @Get('access-review')
+  listAccessReviews() {
+    return this.admin.listAccessReviews();
   }
 
   @RequirePermissions(PERMISSIONS.USER_READ)

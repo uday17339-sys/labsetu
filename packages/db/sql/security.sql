@@ -186,7 +186,12 @@ DECLARE
     -- makes, from whom they buy it, and what failed.
     'material', 'goods_receipt', 'material_batch', 'specification', 'spec_limit',
     'sampling_request', 'batch_disposition', 'oos_investigation',
-    'certificate_of_analysis'
+    'certificate_of_analysis',
+    -- Part 11 §11.300. Password history holds only hashes and cannot
+    -- authenticate anyone, but it still says which accounts exist and how often
+    -- they change credentials; access reviews name who audits whom. Both are
+    -- tenant-confidential.
+    'password_history', 'access_review'
   ];
   tenant_col text;
 BEGIN
