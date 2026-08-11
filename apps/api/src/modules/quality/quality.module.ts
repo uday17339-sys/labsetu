@@ -76,6 +76,52 @@ const effectivenessSchema = z.object({
   note: z.string().trim().min(20, 'Record the evidence the verdict rests on'),
 });
 
+
+const requestChangeSchema = z.object({
+  title: z.string().trim().min(8).max(200),
+  description: z.string().trim().min(30),
+  changeType: z.enum([
+    'SPECIFICATION',
+    'METHOD',
+    'EQUIPMENT',
+    'PROCESS',
+    'DOCUMENT',
+    'SUPPLIER',
+    'SYSTEM',
+    'OTHER',
+  ]),
+  justification: z
+    .string()
+    .trim()
+    .min(30, 'Say why the change is needed — "improvement" is not a justification'),
+  classification: z.enum(['UNCLASSIFIED', 'MINOR', 'MAJOR', 'CRITICAL']).optional(),
+});
+
+const assessChangeSchema = z.object({
+  impactAssessment: z
+    .string()
+    .trim()
+    .min(40, 'A change with no impact assessment is the finding'),
+  prerequisites: z.string().trim().max(2000).optional(),
+  classification: z.enum(['MINOR', 'MAJOR', 'CRITICAL']).optional(),
+});
+
+const decideChangeSchema = z.object({
+  approve: z.boolean(),
+  note: z.string().trim().min(15, 'Record the basis of the decision'),
+});
+
+const implementChangeSchema = z.object({
+  implementationNote: z.string().trim().min(15),
+});
+
+const reviewChangeSchema = z.object({
+  reviewNote: z
+    .string()
+    .trim()
+    .min(30, 'Did it do what it claimed, and nothing it did not claim?'),
+});
+
 @Controller({ path: 'quality', version: '1' })
 export class QualityController {
   constructor(private readonly quality: QualityService) {}
@@ -167,6 +213,56 @@ export class QualityController {
     @Body(zodPipe(effectivenessSchema)) body: z.infer<typeof effectivenessSchema>,
   ) {
     return this.quality.checkCapaEffectiveness(id, body);
+  }
+
+  // ----------------------------------------------------------- change control
+
+  @RequirePermissions(PERMISSIONS.CHANGE_READ)
+  @Get('changes')
+  listChanges(@Query('status') status?: string) {
+    return this.quality.listChanges({ status });
+  }
+
+  @RequirePermissions(PERMISSIONS.CHANGE_REQUEST)
+  @Post('changes')
+  requestChange(@Body(zodPipe(requestChangeSchema)) body: z.infer<typeof requestChangeSchema>) {
+    return this.quality.requestChange(body);
+  }
+
+  @RequirePermissions(PERMISSIONS.CHANGE_REQUEST)
+  @Post('changes/:id/assess')
+  assessChange(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(zodPipe(assessChangeSchema)) body: z.infer<typeof assessChangeSchema>,
+  ) {
+    return this.quality.assessChange(id, body);
+  }
+
+  @RequirePermissions(PERMISSIONS.CHANGE_APPROVE)
+  @Post('changes/:id/decision')
+  decideChange(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(zodPipe(decideChangeSchema)) body: z.infer<typeof decideChangeSchema>,
+  ) {
+    return this.quality.decideChange(id, body);
+  }
+
+  @RequirePermissions(PERMISSIONS.CHANGE_REQUEST)
+  @Post('changes/:id/implement')
+  implementChange(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(zodPipe(implementChangeSchema)) body: z.infer<typeof implementChangeSchema>,
+  ) {
+    return this.quality.implementChange(id, body);
+  }
+
+  @RequirePermissions(PERMISSIONS.CHANGE_APPROVE)
+  @Post('changes/:id/review')
+  reviewChange(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(zodPipe(reviewChangeSchema)) body: z.infer<typeof reviewChangeSchema>,
+  ) {
+    return this.quality.reviewChange(id, body);
   }
 }
 

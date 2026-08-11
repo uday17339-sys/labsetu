@@ -329,6 +329,131 @@ async function main() {
     ? ok('the auditor can read the whole register', `${auditorRead.body.length} deviations`)
     : bad('auditor reads', `${auditorRead.status}`);
 
+  // =========================================================== change control
+  section('Change control');
+
+  const changes = await api('GET', '/quality/changes', { token: qa.accessToken });
+  changes.status === 200 && changes.body.length > 0
+    ? ok('the change register is populated', `${changes.body.length} changes`)
+    : bad('change register', JSON.stringify(changes.body).slice(0, 130));
+
+  const qa2 = await login('qa2@vantage.test');
+
+  const change = await api('POST', '/quality/changes', {
+    token: qa2.accessToken,
+    body: {
+      title: 'Move the dissolution medium preparation to a validated bulk batch',
+      description:
+        'Prepare phosphate buffer pH 6.8 as a validated 20 L bulk with a seven-day expiry rather ' +
+        'than preparing 900 mL per vessel on the day of testing.',
+      changeType: 'METHOD',
+      justification:
+        'Per-vessel preparation is the largest single source of dissolution variability we see, ' +
+        'and it consumes analyst time on every run. A bulk preparation with a defined hold time ' +
+        'removes the variable without altering the method itself.',
+    },
+  });
+  change.status < 300 && change.body.status === 'DRAFT'
+    ? ok('a change is raised as a draft', change.body.changeNumber)
+    : bad('raise change', `${change.status} ${JSON.stringify(change.body).slice(0, 120)}`);
+
+  // THE CONTROL: no approval without a recorded impact assessment.
+  const approveUnassessed = await api('POST', `/quality/changes/${change.body.id}/decision`, {
+    token: qa.accessToken,
+    body: { approve: true, note: 'Approving before anyone has assessed the impact.' },
+  });
+  approveUnassessed.status >= 400
+    ? ok(
+        'a change cannot be approved before it is assessed',
+        String(approveUnassessed.body?.detail ?? '').slice(0, 58),
+      )
+    : bad('assessment before approval', `${approveUnassessed.status}`);
+
+  const assessed = await api('POST', `/quality/changes/${change.body.id}/assess`, {
+    token: qa2.accessToken,
+    body: {
+      impactAssessment:
+        'The method is unchanged; only the preparation scale and hold time differ. Bulk medium ' +
+        'requires a validated seven-day hold supported by pH and dissolved-oxygen data. No ' +
+        'revalidation of the dissolution method is required. Existing results are unaffected.',
+      prerequisites:
+        'Hold-time study completed and approved. Analysts briefed. SOP/QC/021 reissued.',
+      classification: 'MAJOR',
+    },
+  });
+  assessed.status < 300 && assessed.body.status === 'PENDING_APPROVAL'
+    ? ok('an assessed change moves to pending approval', assessed.body.classification)
+    : bad('assess change', `${assessed.status} ${JSON.stringify(assessed.body).slice(0, 120)}`);
+
+  // THE CONTROL: four-eyes. The requester cannot approve their own change.
+  const selfApprove = await api('POST', `/quality/changes/${change.body.id}/decision`, {
+    token: qa2.accessToken,
+    body: { approve: true, note: 'Approving the change I raised myself.' },
+  });
+  selfApprove.status === 403
+    ? ok('the requester cannot approve their own change', 'four-eyes on a specification change')
+    : bad('four-eyes on change approval', `${selfApprove.status}`);
+
+  const approved = await api('POST', `/quality/changes/${change.body.id}/decision`, {
+    token: qa.accessToken,
+    body: {
+      approve: true,
+      note: 'Approved subject to the hold-time study being closed before implementation.',
+    },
+  });
+  approved.status < 300 && approved.body.status === 'APPROVED'
+    ? ok('a second approver can approve it', `approved by ${approved.body.approvedBy}`)
+    : bad('approve change', `${approved.status} ${JSON.stringify(approved.body).slice(0, 120)}`);
+
+  const implemented = await api('POST', `/quality/changes/${change.body.id}/implement`, {
+    token: qa2.accessToken,
+    body: { implementationNote: 'SOP/QC/021 reissued at revision 4; analysts briefed 12 Aug.' },
+  });
+  implemented.status < 300 && implemented.body.status === 'IMPLEMENTED'
+    ? ok('an approved change can be implemented')
+    : bad('implement change', `${implemented.status}`);
+
+  const listAfter = await api('GET', '/quality/changes', { token: qa.accessToken });
+  (listAfter.body ?? []).some((c) => c.awaitingReview)
+    ? ok('implemented-but-unreviewed is surfaced', 'reads as finished on a summary otherwise')
+    : bad('awaiting review tracked');
+
+  const reviewed = await api('POST', `/quality/changes/${change.body.id}/review`, {
+    token: qa.accessToken,
+    body: {
+      reviewNote:
+        'Six dissolution runs completed on bulk medium since implementation. Variability between ' +
+        'vessels reduced and no new excursions were seen. The change did what it claimed and ' +
+        'nothing it did not claim.',
+    },
+  });
+  reviewed.status < 300 && reviewed.body.status === 'CLOSED'
+    ? ok('the post-implementation review closes it out', 'the step that gets skipped')
+    : bad('review change', `${reviewed.status} ${JSON.stringify(reviewed.body).slice(0, 120)}`);
+
+  // Implementing without approval is the whole reason the record exists.
+  const sneaky = await api('POST', '/quality/changes', {
+    token: qa2.accessToken,
+    body: {
+      title: 'A change somebody tries to implement without approval',
+      description:
+        'Raised purely to prove that an unapproved change cannot be marked as implemented.',
+      changeType: 'DOCUMENT',
+      justification:
+        'Exists to demonstrate the control refusing, which is the only reason this record exists.',
+    },
+  });
+  const implementUnapproved = await api('POST', `/quality/changes/${sneaky.body.id}/implement`, {
+    token: qa2.accessToken,
+    body: { implementationNote: 'Implementing without waiting for approval.' },
+  });
+  implementUnapproved.status >= 400
+    ? ok(
+        'an unapproved change cannot be implemented',
+        String(implementUnapproved.body?.detail ?? '').slice(0, 56),
+      )
+    : bad('implementation gated on approval', `${implementUnapproved.status}`);
+
   // =========================================================== audit trail
   section('The thread is in the audit trail');
 
@@ -337,6 +462,9 @@ async function main() {
     ['DEVIATION_CLOSED', 'closing'],
     ['CAPA_RAISED', 'the action'],
     ['CAPA_VERIFIED', 'the effectiveness check'],
+    ['CHANGE_REQUESTED', 'raising a change'],
+    ['CHANGE_APPROVED', 'approving a change'],
+    ['CHANGE_IMPLEMENTED', 'implementing a change'],
   ]) {
     const entries = await api('GET', `/compliance/audit?action=${verb}&limit=5`, {
       token: admin.accessToken,

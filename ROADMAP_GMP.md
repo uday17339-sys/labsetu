@@ -83,8 +83,10 @@ Ordered by what a plant and an inspector actually need, not by what is easy.
 
 ### P1 — The quality system the laboratory hangs off
 
-> 1.1 and 1.2 landed together: a CAPA with no deviation to hang off is not a
-> quality system, and a deviation that cannot raise one is a log.
+> **P1 complete.** 1.1 and 1.2 landed together — a CAPA with no deviation to
+> hang off is not a quality system, and a deviation that cannot raise one is a
+> log. 1.3 followed, sharing the same CAPA register. 40 checks in
+> `quality-verify`.
 
 Without these, an inspector cannot follow the thread from a problem to its
 resolution, which is the thread they always pull.
@@ -93,7 +95,7 @@ resolution, which is the thread they always pull.
 |---|---|---|---|
 | 1.1 | **Deviation management** | A deviation must be a record, not a free-text reference on a disposition | ✅ **Done** — raised by anyone on the floor (deliberately wide), investigated, classified at closure, linked to batch and instrument, aged in the queue. Closing requires an investigation and a root cause; a deviation with product impact cannot close without a CAPA. Detection lag is recorded because the gap between an event and anyone noticing is itself a finding |
 | 1.2 | **CAPA** | Actions with owners, due dates and a check that they worked | ✅ **Done** — one shared register across deviations, OOS and change control; an orphan CAPA is refused; effectiveness cannot be certified the day the action was completed; a NOT_EFFECTIVE verdict reopens rather than closes. `CAPA_VERIFY` is separate from `CAPA_MANAGE` so the person who did the work is not the one certifying it worked |
-| 1.3 | **Change control** | Any change to a specification, method, instrument or system needs a request, impact assessment, approval and implementation record. Schedule M and Annex 11 both require it | ☐ To do |
+| 1.3 | **Change control** | A change needs a request, impact assessment, approval, implementation and post-implementation review | ✅ **Done** — full lifecycle draft → assessed → approved → implemented → closed. Approval is refused before an impact assessment exists, and refused to the person who raised it (four-eyes on a specification change). An unapproved change cannot be implemented; implemented-but-unreviewed is surfaced separately because it reads as finished on any summary |
 
 ### P2 — Manufacturing QC breadth
 

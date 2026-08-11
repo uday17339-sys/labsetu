@@ -1,4 +1,9 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AuditService } from '../../common/audit/audit.service';
 import { RequestContextStore } from '../../common/context/request-context';
@@ -600,4 +605,290 @@ export class QualityService {
         : null,
     };
   }
+
+  // ----------------------------------------------------------- change control
+
+  /**
+   * A proposed change to anything under control.
+   *
+   * The record answers the question asked when a batch made after a change
+   * behaves differently from one made before it: who approved this, on what
+   * assessment, and what happened afterwards. A change with no impact
+   * assessment is the finding.
+   */
+  async requestChange(input: {
+    title: string;
+    description: string;
+    changeType: string;
+    justification: string;
+    classification?: string;
+  }) {
+    const ctx = RequestContextStore.require();
+    const tx = this.prisma.tx;
+
+    const changeNumber = await this.nextNumber('change_control', 'CC');
+
+    const change = await tx.changeControl.create({
+      data: {
+        tenantId: ctx.tenantId!,
+        changeNumber,
+        title: input.title.trim(),
+        description: input.description.trim(),
+        changeType: input.changeType as never,
+        classification: (input.classification ?? 'UNCLASSIFIED') as never,
+        justification: input.justification.trim(),
+        status: 'DRAFT',
+        requestedBy: ctx.userId!,
+      },
+    });
+
+    await this.audit.record(tx, {
+      action: 'CHANGE_REQUESTED',
+      entityType: 'ChangeControl',
+      entityId: change.id,
+      after: { changeNumber, changeType: input.changeType },
+      reason: input.title.trim(),
+    });
+
+    return this.changeView(change.id);
+  }
+
+  /**
+   * The impact assessment, recorded before anyone can approve.
+   *
+   * Separated from approval deliberately. Assessing and approving in one action
+   * lets the approver write the assessment that justifies the decision they had
+   * already made — which is exactly the sequence a reviewer looks for.
+   */
+  async assessChange(id: string, input: { impactAssessment: string; prerequisites?: string; classification?: string }) {
+    const tx = this.prisma.tx;
+    const change = await tx.changeControl.findUnique({ where: { id } });
+    if (!change) throw new NotFoundException('Change control not found');
+    if (change.status !== 'DRAFT' && change.status !== 'PENDING_APPROVAL') {
+      throw new BadRequestException(
+        `${change.changeNumber} is ${change.status.toLowerCase().replace(/_/g, ' ')} and its ` +
+          `assessment can no longer be edited. Raise a new change control.`,
+      );
+    }
+
+    const updated = await tx.changeControl.update({
+      where: { id },
+      data: {
+        impactAssessment: input.impactAssessment.trim(),
+        prerequisites: input.prerequisites?.trim() || change.prerequisites,
+        classification: (input.classification ?? change.classification) as never,
+        status: 'PENDING_APPROVAL',
+      },
+    });
+
+    await this.audit.record(tx, {
+      action: 'UPDATE',
+      entityType: 'ChangeControl',
+      entityId: id,
+      before: { status: change.status },
+      after: { status: updated.status, classification: updated.classification },
+      reason: input.impactAssessment.trim().slice(0, 500),
+    });
+
+    return this.changeView(id);
+  }
+
+  /**
+   * Approval, or refusal.
+   *
+   * Refuses to approve a change the requester raised themselves. Four-eyes on a
+   * change to a specification matters for the same reason it matters on a
+   * result: the person proposing it is the last person who should be judging
+   * whether it is safe.
+   */
+  async decideChange(id: string, input: { approve: boolean; note: string }) {
+    const ctx = RequestContextStore.require();
+    const tx = this.prisma.tx;
+
+    const change = await tx.changeControl.findUnique({ where: { id } });
+    if (!change) throw new NotFoundException('Change control not found');
+    if (change.status !== 'PENDING_APPROVAL') {
+      throw new BadRequestException(
+        `${change.changeNumber} is ${change.status.toLowerCase().replace(/_/g, ' ')}. Only a ` +
+          `change with a recorded impact assessment can be approved.`,
+      );
+    }
+    if (change.requestedBy === ctx.userId) {
+      throw new ForbiddenException(
+        'You raised this change, so you cannot also approve it. Another approver must review it.',
+      );
+    }
+
+    const updated = await tx.changeControl.update({
+      where: { id },
+      data: input.approve
+        ? {
+            status: 'APPROVED',
+            approvedBy: ctx.userId!,
+            approvedAt: new Date(),
+            approvalNote: input.note.trim(),
+          }
+        : { status: 'REJECTED', rejectedReason: input.note.trim() },
+    });
+
+    await this.audit.record(tx, {
+      action: 'CHANGE_APPROVED',
+      entityType: 'ChangeControl',
+      entityId: id,
+      before: { status: change.status },
+      after: { changeNumber: updated.changeNumber, status: updated.status },
+      reason: input.note.trim().slice(0, 500),
+    });
+
+    return this.changeView(id);
+  }
+
+  async implementChange(id: string, input: { implementationNote: string }) {
+    const ctx = RequestContextStore.require();
+    const tx = this.prisma.tx;
+
+    const change = await tx.changeControl.findUnique({ where: { id } });
+    if (!change) throw new NotFoundException('Change control not found');
+    if (change.status !== 'APPROVED') {
+      throw new BadRequestException(
+        `${change.changeNumber} has not been approved. An unapproved change cannot be ` +
+          `implemented — that is the whole point of the record.`,
+      );
+    }
+
+    const updated = await tx.changeControl.update({
+      where: { id },
+      data: {
+        status: 'IMPLEMENTED',
+        implementedBy: ctx.userId!,
+        implementedAt: new Date(),
+        implementationNote: input.implementationNote.trim(),
+      },
+    });
+
+    await this.audit.record(tx, {
+      action: 'CHANGE_IMPLEMENTED',
+      entityType: 'ChangeControl',
+      entityId: id,
+      before: { status: change.status },
+      after: { changeNumber: updated.changeNumber, status: updated.status },
+      reason: input.implementationNote.trim().slice(0, 500),
+    });
+
+    return this.changeView(id);
+  }
+
+  /**
+   * Post-implementation review — did the change do what it claimed, without
+   * doing anything it did not claim? This is the step that gets skipped, and
+   * skipping it is how a change that quietly broke something stays undiscovered
+   * until a batch fails.
+   */
+  async reviewChange(id: string, input: { reviewNote: string }) {
+    const ctx = RequestContextStore.require();
+    const tx = this.prisma.tx;
+
+    const change = await tx.changeControl.findUnique({ where: { id } });
+    if (!change) throw new NotFoundException('Change control not found');
+    if (change.status !== 'IMPLEMENTED') {
+      throw new BadRequestException(
+        `${change.changeNumber} has not been implemented, so there is nothing to review.`,
+      );
+    }
+
+    const updated = await tx.changeControl.update({
+      where: { id },
+      data: {
+        status: 'CLOSED',
+        reviewedBy: ctx.userId!,
+        reviewedAt: new Date(),
+        reviewNote: input.reviewNote.trim(),
+      },
+    });
+
+    await this.audit.record(tx, {
+      action: 'UPDATE',
+      entityType: 'ChangeControl',
+      entityId: id,
+      before: { status: change.status },
+      after: { changeNumber: updated.changeNumber, status: 'CLOSED' },
+      reason: input.reviewNote.trim().slice(0, 500),
+    });
+
+    return this.changeView(id);
+  }
+
+  async listChanges(params: { status?: string } = {}) {
+    const tx = this.prisma.tx;
+    const rows = await tx.changeControl.findMany({
+      where: params.status ? { status: params.status as never } : {},
+      orderBy: [{ requestedAt: 'desc' }],
+      take: 200,
+      include: { capas: { select: { id: true, status: true } } },
+    });
+
+    const now = Date.now();
+    return rows.map((c) => ({
+      id: c.id,
+      changeNumber: c.changeNumber,
+      title: c.title,
+      changeType: c.changeType,
+      classification: c.classification,
+      status: c.status,
+      requestedAt: c.requestedAt.toISOString(),
+      approvedAt: c.approvedAt?.toISOString() ?? null,
+      implementedAt: c.implementedAt?.toISOString() ?? null,
+      openDays: Math.floor((now - c.requestedAt.getTime()) / 864e5),
+      /// Implemented but never reviewed is the state that hides: it reads as
+      /// finished on every summary while the post-implementation check is
+      /// outstanding.
+      awaitingReview: c.status === 'IMPLEMENTED',
+      capaCount: c.capas.filter((x) => x.status !== 'CANCELLED').length,
+    }));
+  }
+
+  private async changeView(id: string) {
+    const tx = this.prisma.tx;
+    const c = await tx.changeControl.findUniqueOrThrow({
+      where: { id },
+      include: { capas: { select: { id: true, capaNumber: true, status: true, title: true } } },
+    });
+
+    const ids = [c.requestedBy, c.approvedBy, c.implementedBy, c.reviewedBy].filter(
+      (x): x is string => !!x,
+    );
+    const people = await tx.user.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, fullName: true },
+    });
+    const name = (id: string | null) =>
+      id ? (people.find((p) => p.id === id)?.fullName ?? null) : null;
+
+    return {
+      id: c.id,
+      changeNumber: c.changeNumber,
+      title: c.title,
+      description: c.description,
+      changeType: c.changeType,
+      classification: c.classification,
+      status: c.status,
+      justification: c.justification,
+      impactAssessment: c.impactAssessment,
+      prerequisites: c.prerequisites,
+      requestedBy: name(c.requestedBy),
+      requestedAt: c.requestedAt.toISOString(),
+      approvedBy: name(c.approvedBy),
+      approvedAt: c.approvedAt?.toISOString() ?? null,
+      approvalNote: c.approvalNote,
+      implementedBy: name(c.implementedBy),
+      implementedAt: c.implementedAt?.toISOString() ?? null,
+      implementationNote: c.implementationNote,
+      reviewedBy: name(c.reviewedBy),
+      reviewedAt: c.reviewedAt?.toISOString() ?? null,
+      reviewNote: c.reviewNote,
+      rejectedReason: c.rejectedReason,
+      capas: c.capas,
+    };
+  }
+
 }
