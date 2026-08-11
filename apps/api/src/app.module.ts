@@ -24,6 +24,7 @@ import { CONFIG, type AppConfig } from './config/configuration';
 import { QualityModule } from './modules/quality/quality.module';
 import { StabilityModule } from './modules/stability/stability.module';
 import { EnvironmentalModule } from './modules/environmental/environmental.module';
+import { PqrModule } from './modules/pqr/pqr.module';
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { EnvironmentalModule } from './modules/environmental/environmental.modul
     QualityModule,
     StabilityModule,
     EnvironmentalModule,
+    PqrModule,
     CatalogModule,
     PatientsModule,
     WorkflowModule,

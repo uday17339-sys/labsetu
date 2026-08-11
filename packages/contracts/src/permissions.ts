@@ -140,6 +140,7 @@ export const PERMISSIONS = {
   /// operator takes plates, a QA lead sets what the limits are.
   EM_RECORD: 'em:record',
   EM_MANAGE: 'em:manage',
+  PQR_READ: 'pqr:read',
   /// Open, progress and close an out-of-specification investigation.
   OOS_MANAGE: 'oos:manage',
   /// Issue a certificate of analysis for a released batch.
@@ -401,6 +402,8 @@ export const DEFAULT_ROLES: Record<
     description:
       'Approves specifications, investigates out-of-specification results, and releases or rejects batches. Independent of the analyst who produced the result.',
     permissions: [
+      PERMISSIONS.PQR_READ,
+
       PERMISSIONS.EM_READ,
       PERMISSIONS.EM_RECORD,
       PERMISSIONS.EM_MANAGE,
@@ -458,6 +461,8 @@ export const DEFAULT_ROLES: Record<
     name: 'Auditor',
     description: 'Read-only access including the full audit trail. Changes nothing.',
     permissions: [
+      PERMISSIONS.PQR_READ,
+
       PERMISSIONS.EM_READ,
 
       PERMISSIONS.STABILITY_READ,

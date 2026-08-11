@@ -2040,6 +2040,149 @@ async function seedWorkflow(): Promise<void> {
         `    environment  ${emPoints.length} monitoring points · ${emReadings} readings · ${emExcursions} above alert`,
       );
 
+      // ------------------------------------------- a year of paracetamol history
+      //
+      // Eight released batches across the review period, so the Product Quality
+      // Review has something to review. A PQR built on one batch is arithmetic,
+      // not a trend, and the trend section is the part a reviewer actually
+      // reads — a mean sitting comfortably mid-specification while the spread
+      // widens is exactly what it exists to catch.
+      //
+      // Assay drifts gently downward and the spread widens across the year.
+      // That is deliberate: it is in specification throughout, so nothing here
+      // is a failure, but the RSD moves and a reviewer should notice.
+      const historyAssay = [99.84, 99.71, 99.78, 99.52, 99.61, 99.33, 99.24, 99.41];
+      const historyLod = [0.18, 0.21, 0.19, 0.24, 0.22, 0.27, 0.29, 0.26];
+
+      // Resolved by code: the maps the outer seed builds are not in this scope,
+      // and reaching for them is the mistake this function keeps inviting.
+      const histMaterial = await tx.material.findFirstOrThrow({
+        where: { code: 'API-PCM', tenantId: TENANT_ID },
+      });
+      const histSpecimen = await tx.specimenType.findFirstOrThrow({
+        where: { code: 'POWD', tenantId: TENANT_ID },
+      });
+
+      for (let i = 0; i < historyAssay.length; i++) {
+        const ago = 330 - i * 40;
+        const batchNumber = `PCM/26/0${100 + i * 3}`;
+
+        // Each historical batch gets its own receipt. Without one the supplier
+        // is Unknown, and supplier rejection rate is the single most actionable
+        // thing a PQR surfaces — a rate concentrated in one vendor is invisible
+        // batch by batch and obvious in a year's review.
+        //
+        // Two suppliers, so the review has something to compare.
+        const histSupplier =
+          i % 3 === 2 ? 'Hetero Drugs Ltd' : 'Sri Krishna Pharmaceuticals';
+        const histGrn = await tx.goodsReceipt.create({
+          data: {
+            tenantId: TENANT_ID,
+            grnNumber: `GRN/25/${String(900 + i).padStart(4, '0')}`,
+            supplierName: histSupplier,
+            invoiceRef: `INV/${histSupplier.slice(0, 3).toUpperCase()}/${1200 + i}`,
+            receivedAt: daysAgo(ago),
+            receivedBy: stores.id,
+          },
+        });
+
+        const histBatch = await tx.materialBatch.create({
+          data: {
+            tenantId: TENANT_ID,
+            materialId: histMaterial.id,
+            goodsReceiptId: histGrn.id,
+            batchNumber,
+            quantityReceived: d(500),
+            quantityAvailable: d(0),
+            unit: 'kg',
+            containerCount: 20,
+            manufacturedAt: daysAgo(ago + 30),
+            expiryDate: daysAhead(1370 - ago),
+            retestDate: daysAhead(1005 - ago),
+            status: 'APPROVED',
+            location: 'Consumed — issued to production',
+            dispositionedAt: daysAgo(ago - 4),
+            dispositionedBy: qa.id,
+            createdAt: daysAgo(ago),
+            createdBy: stores.id,
+          },
+        });
+
+        orderSeq++;
+        arSeq++;
+        const order = await tx.labOrder.create({
+          data: {
+            tenantId: TENANT_ID,
+            labId: unit.id,
+            batchId: histBatch.id,
+            orderNumber: `ORD/H/${String(orderSeq).padStart(5, '0')}`,
+            status: 'COMPLETED',
+            createdBy: analyst.id,
+            createdAt: daysAgo(ago - 1),
+          },
+        });
+
+        const sample = await tx.sample.create({
+          data: {
+            tenantId: TENANT_ID,
+            labId: unit.id,
+            orderId: order.id,
+            accessionNumber: `U1H${String(arSeq).padStart(9, '0')}`,
+            specimenTypeId: histSpecimen.id,
+            status: 'COMPLETED',
+            collectedAt: daysAgo(ago - 1),
+            receivedAt: daysAgo(ago - 1),
+            createdBy: analyst.id,
+          },
+        });
+
+        for (const [testCode, analyteCode, value, unitStr, ref] of [
+          ['TASSAY', 'ASSAY', historyAssay[i]!, '%', '99.0 – 101.0'],
+          ['TLOD', 'LOD', historyLod[i]!, '%', 'NMT 0.5'],
+        ] as const) {
+          const st = await tx.sampleTest.create({
+            data: {
+              tenantId: TENANT_ID,
+              sampleId: sample.id,
+              testDefinitionId: (await testByCode(testCode)).id,
+              testVersion: 1,
+              status: 'AUTHORIZED',
+              // resultAt, not enteredAt — the field records when the result
+              // landed, and the entering user is enteredBy beside it.
+              enteredBy: analyst.id,
+              resultAt: daysAgo(ago - 2),
+              verifiedBy: analyst.id,
+              verifiedAt: daysAgo(ago - 2),
+              authorizedBy: qa.id,
+              authorizedAt: daysAgo(ago - 3),
+            },
+          });
+
+          const analyte = await analyteByCode(analyteCode);
+          await tx.result.create({
+            data: {
+              tenantId: TENANT_ID,
+              sampleTestId: st.id,
+              analyteId: analyte.id,
+              version: 1,
+              isCurrent: true,
+              value: String(value),
+              numericValue: d(value),
+              unit: unitStr,
+              refDisplay: ref,
+              flag: 'NORMAL',
+              source: 'MANUAL',
+              enteredBy: analyst.id,
+              enteredAt: daysAgo(ago - 2),
+            },
+          });
+        }
+      }
+
+      console.log(
+        `    history      ${historyAssay.length} released paracetamol batches across the review period`,
+      );
+
       console.log(`    workflow     ${orderSeq} AR numbers, ${reqSeq} sampling requests`);
       console.log('    dispositions 1 approved · 1 rejected (OOS) · 1 approved-with-deviation');
       console.log('    oos          OOS/26/0007 closed · OOS/26/0012 OPEN (dissolution, Phase I)');

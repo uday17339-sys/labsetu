@@ -725,6 +725,76 @@ async function main() {
     ? ok('readings are audited as their own verb', 'EM_READING_RECORDED')
     : bad('EM audited', JSON.stringify(emAudit.body).slice(0, 110));
 
+  // ================================================ product quality review
+  section('Product Quality Review (Schedule M)');
+
+  const mats = await api('GET', '/stores/materials', { token: qa.accessToken });
+  const pcm = (mats.body ?? []).find((m) => m.code === 'API-PCM');
+
+  const pqr = await api('GET', `/pqr/materials/${pcm.id}`, { token: qa.accessToken });
+  pqr.status === 200
+    ? ok('a review generates for a product', `${pqr.body.material.code} ${pqr.body.period.from} → ${pqr.body.period.to}`)
+    : bad('generate PQR', `${pqr.status} ${JSON.stringify(pqr.body).slice(0, 120)}`);
+
+  pqr.body?.batches?.total > 1
+    ? ok('it covers the batches made in the period', `${pqr.body.batches.total} batches`)
+    : bad('batches in review', `${pqr.body?.batches?.total}`);
+
+  typeof pqr.body?.batches?.rejectionRatePct === 'number'
+    ? ok('it reports a rejection rate', `${pqr.body.batches.rejectionRatePct}%`)
+    : bad('rejection rate', 'not computed');
+
+  // Supplier concentration is the single most actionable thing a review
+  // surfaces, and it is invisible batch by batch.
+  (pqr.body?.suppliers ?? []).length > 1
+    ? ok('it breaks results down by supplier', pqr.body.suppliers.map((x) => x.name.split(' ')[0]).join(', '))
+    : bad('supplier breakdown', JSON.stringify(pqr.body?.suppliers).slice(0, 110));
+
+  // The trend section is the part a reviewer actually reads.
+  const assay = (pqr.body?.trends ?? []).find((t) => t.analyte === 'ASSAY');
+  assay && assay.n > 1 && assay.rsdPct != null
+    ? ok('assay is trended across the period', `n=${assay.n} mean ${assay.mean} RSD ${assay.rsdPct}%`)
+    : bad('assay trend', JSON.stringify(assay).slice(0, 120));
+
+  // An analyte measured once is reported with a null spread rather than
+  // omitted — omitting it reads as "not tested".
+  const single = (pqr.body?.trends ?? []).find((t) => t.n === 1);
+  !single || single.sd === null
+    ? ok('a single result reports no standard deviation', 'one point is not a trend')
+    : bad('single-result handling', JSON.stringify(single).slice(0, 110));
+
+  pqr.body?.deviations?.total >= 0 && pqr.body?.capa && pqr.body?.changes && pqr.body?.stability
+    ? ok(
+        'the review pulls the whole quality system together',
+        `${pqr.body.deviations.total} deviations · ${pqr.body.capa.total} CAPA · ` +
+          `${pqr.body.changes.total} changes · ${pqr.body.stability.length} studies`,
+      )
+    : bad('review completeness', JSON.stringify(Object.keys(pqr.body ?? {})).slice(0, 120));
+
+  // THE JUDGEMENT: the system assembles, the manufacturer concludes.
+  pqr.body?.conclusion === null
+    ? ok('the system does NOT write the conclusion', 'the regulation asks the manufacturer to conclude')
+    : bad('conclusion left to the reviewer', `got ${JSON.stringify(pqr.body?.conclusion)}`);
+
+  const badPeriod = await api('GET', `/pqr/materials/${pcm.id}?from=2026-01-01&to=2025-01-01`, {
+    token: qa.accessToken,
+  });
+  badPeriod.status >= 400
+    ? ok('a period that ends before it starts is REFUSED')
+    : bad('period validated', `${badPeriod.status}`);
+
+  const qcPqr = await api('GET', `/pqr/materials/${pcm.id}`, { token: qc.accessToken });
+  qcPqr.status === 403
+    ? ok('the bench cannot pull a product quality review', '403 — needs pqr:read')
+    : bad('PQR permissioned', `${qcPqr.status}`);
+
+  const pqrAudit = await api('GET', '/compliance/audit?action=PQR_GENERATED&limit=5', {
+    token: admin.accessToken,
+  });
+  (pqrAudit.body?.items ?? []).length > 0
+    ? ok('generating a review is audited', 'PQR_GENERATED')
+    : bad('PQR audited', JSON.stringify(pqrAudit.body).slice(0, 110));
+
   // =========================================================== audit trail
   section('The thread is in the audit trail');
 
