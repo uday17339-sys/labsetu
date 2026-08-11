@@ -454,6 +454,143 @@ async function main() {
       )
     : bad('implementation gated on approval', `${implementUnapproved.status}`);
 
+  // =========================================================== stability
+  section('Stability studies (ICH Q1A)');
+
+  const protocols = await api('GET', '/stability/protocols', { token: qa.accessToken });
+  protocols.status === 200 && protocols.body.length > 0
+    ? ok('a stability protocol is configured', protocols.body[0].code)
+    : bad('stability protocols', JSON.stringify(protocols.body).slice(0, 120));
+
+  const studies = await api('GET', '/stability/studies', { token: qa.accessToken });
+  const study = (studies.body ?? [])[0];
+  study
+    ? ok('a study is running against a batch', `${study.studyNumber} · ${study.batchNumber}`)
+    : bad('stability studies', JSON.stringify(studies.body).slice(0, 120));
+
+  study && study.pullsTotal === 8
+    ? ok('every timepoint was scheduled at study start', `${study.pullsTotal} pulls`)
+    : bad('pulls scheduled up front', `${study?.pullsTotal} pulls`);
+
+  // A missed timepoint is kept, not tidied away. A study with no gaps is a
+  // study nobody has ever run.
+  study && study.pullsMissed > 0
+    ? ok('a missed timepoint is retained on the record', `${study.pullsMissed} missed`)
+    : bad('missed pull retained', `missed=${study?.pullsMissed}`);
+
+  const detail = await api('GET', `/stability/studies/${study.id}`, { token: qa.accessToken });
+  const months = (detail.body?.pulls ?? []).map((p) => p.timepointMonths);
+  JSON.stringify(months) === JSON.stringify([0, 3, 6, 9, 12, 18, 24, 36])
+    ? ok('the schedule follows the protocol', months.join('/') + ' months')
+    : bad('timepoint schedule', JSON.stringify(months));
+
+  // Month arithmetic must not drift across a 36-month study: adding days
+  // accumulates error and lands the last pull on the wrong side of a month.
+  const dueDays = (detail.body?.pulls ?? []).map((p) => Number(p.dueAt.slice(8, 10)));
+  new Set(dueDays).size === 1
+    ? ok('timepoints land on the same day of the month', `day ${dueDays[0]}, no drift over 36 months`)
+    : bad('month arithmetic drifts', dueDays.join(','));
+
+  const scheduled = (detail.body?.pulls ?? []).find((p) => p.status === 'SCHEDULED');
+  const missedAgain = await api('POST', `/stability/pulls/${scheduled.id}/missed`, {
+    token: qa.accessToken,
+    body: { note: 'short' },
+  });
+  missedAgain.status >= 400
+    ? ok('marking a timepoint missed needs a reason', 'it is a gap in shelf-life evidence')
+    : bad('missed reason required', `${missedAgain.status}`);
+
+  const recorded = await api('POST', `/stability/pulls/${scheduled.id}/record`, {
+    token: qa.accessToken,
+    body: { note: 'Drawn from Chamber 2 and submitted to the laboratory.' },
+  });
+  recorded.status < 300
+    ? ok('a pull can be recorded against the timepoint', `${scheduled.timepointMonths} months`)
+    : bad('record pull', `${recorded.status} ${JSON.stringify(recorded.body).slice(0, 110)}`);
+
+  const twice = await api('POST', `/stability/pulls/${scheduled.id}/record`, {
+    token: qa.accessToken,
+    body: { note: 'Recording the same pull a second time.' },
+  });
+  twice.status >= 400
+    ? ok('a timepoint cannot be pulled twice', 'a pull is recorded once')
+    : bad('double pull refused', `${twice.status}`);
+
+  const auditorPull = await api('POST', `/stability/pulls/${scheduled.id}/missed`, {
+    token: auditor.accessToken,
+    body: { note: 'An auditor should not be able to alter the stability record.' },
+  });
+  auditorPull.status === 403
+    ? ok('the auditor cannot alter a stability record', '403 — read-only')
+    : bad('stability permissioned', `${auditorPull.status}`);
+
+  // Start a study through the API rather than relying on the seeded one. The
+  // seed writes rows directly, so it produces no audit entries — asserting on
+  // the seeded study would have been asserting on nothing.
+  const stbBatches = await api('GET', '/stores/batches?limit=50', { token: qa.accessToken });
+  const freeBatch = (stbBatches.body?.items ?? stbBatches.body ?? []).find(
+    (b) => b.batchNumber !== study.batchNumber,
+  );
+
+  const newStudy = await api('POST', '/stability/studies', {
+    token: qa.accessToken,
+    body: {
+      protocolId: protocols.body[0].id,
+      batchId: freeBatch.id,
+      startedAt: new Date(Date.now() - 200 * 864e5).toISOString().slice(0, 10),
+      chamber: 'Stability Chamber 1 (30 °C / 65 % RH)',
+    },
+  });
+  newStudy.status < 300
+    ? ok('a batch can be put on stability through the API', newStudy.body.studyNumber)
+    : bad('start study', `${newStudy.status} ${JSON.stringify(newStudy.body).slice(0, 130)}`);
+
+  (newStudy.body?.pulls ?? []).length === 8
+    ? ok('starting a study schedules its whole timeline', `${newStudy.body.pulls.length} pulls`)
+    : bad('pulls scheduled on start', `${newStudy.body?.pulls?.length}`);
+
+  const dup = await api('POST', '/stability/studies', {
+    token: qa.accessToken,
+    body: {
+      protocolId: protocols.body[0].id,
+      batchId: freeBatch.id,
+      startedAt: new Date().toISOString().slice(0, 10),
+    },
+  });
+  dup.status >= 400
+    ? ok('the same batch cannot run twice on one protocol', 'one study per batch per protocol')
+    : bad('duplicate study refused', `${dup.status}`);
+
+  const toMiss = (newStudy.body?.pulls ?? []).find((x) => x.status === 'SCHEDULED' && x.isOverdue);
+  if (toMiss) {
+    const missed = await api('POST', `/stability/pulls/${toMiss.id}/missed`, {
+      token: qa.accessToken,
+      body: {
+        note:
+          'Chamber door seal replaced over the due window and samples were not drawn inside the ' +
+          'permitted tolerance. Recorded as missed rather than back-dated.',
+      },
+    });
+    missed.status < 300
+      ? ok('an overdue timepoint can be recorded as missed', `${toMiss.timepointMonths} months`)
+      : bad('mark missed', `${missed.status} ${JSON.stringify(missed.body).slice(0, 110)}`);
+  } else {
+    bad('an overdue pull to mark missed', 'the new study produced none');
+  }
+
+  for (const [verb, label] of [
+    ['STABILITY_STUDY_STARTED', 'starting a study'],
+    ['STABILITY_PULL_RECORDED', 'taking a pull'],
+    ['STABILITY_PULL_MISSED', 'missing a pull'],
+  ]) {
+    const entries = await api('GET', `/compliance/audit?action=${verb}&limit=5`, {
+      token: admin.accessToken,
+    });
+    (entries.body?.items ?? []).length > 0
+      ? ok(`${label} is its own verb`, verb)
+      : bad(`${verb} audited`, JSON.stringify(entries.body).slice(0, 100));
+  }
+
   // =========================================================== audit trail
   section('The thread is in the audit trail');
 

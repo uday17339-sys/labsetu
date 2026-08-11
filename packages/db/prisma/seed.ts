@@ -1858,6 +1858,82 @@ async function seedWorkflow(): Promise<void> {
         `    quality      2 deviations (1 closed, 1 open) · 2 CAPAs · ${changeApproved.changeNumber} implemented`,
       );
 
+      // ------------------------------------------------------- stability
+      //
+      // One long-term study part-way through, so the pull queue has both
+      // history and something falling due. Started 13 months ago on the
+      // released paracetamol batch: the 0, 3, 6, 9 and 12-month pulls are
+      // behind us, 18 is ahead. That mix is what a real chamber looks like.
+      const stbProtocol = await tx.stabilityProtocol.create({
+        data: {
+          tenantId: TENANT_ID,
+          code: 'STB/LT/PCM-API',
+          name: 'Paracetamol API — long term, 30 °C / 65 % RH',
+          // Zone IVb, which is the condition an Indian site actually runs.
+          storageCondition: '30 °C ± 2 °C / 65 % RH ± 5 % RH',
+          studyType: 'LONG_TERM',
+          timepointsMonths: [0, 3, 6, 9, 12, 18, 24, 36],
+          testCodes: ['TDESC', 'TASSAY', 'TRSUB', 'TLOD'],
+        },
+      });
+
+      // Looked up by number: the map the main seed builds is not in scope here,
+      // and the released paracetamol batch is the one a long-term study runs on.
+      const stbBatch = await tx.materialBatch.findFirst({
+        where: { batchNumber: 'PCM/26/0141', tenantId: TENANT_ID },
+      });
+      if (stbBatch) {
+        const started = daysAgo(395);
+        const study = await tx.stabilityStudy.create({
+          data: {
+            tenantId: TENANT_ID,
+            protocolId: stbProtocol.id,
+            batchId: stbBatch.id,
+            studyNumber: 'STB/26/0004',
+            startedAt: started,
+            chamber: 'Stability Chamber 2 (30 °C / 65 % RH)',
+            createdBy: qa.id,
+          },
+        });
+
+        const addMonths = (from: Date, months: number) => {
+          const d = new Date(from);
+          const day = d.getUTCDate();
+          d.setUTCMonth(d.getUTCMonth() + months, 1);
+          const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+          d.setUTCDate(Math.min(day, last));
+          return d;
+        };
+
+        for (const months of stbProtocol.timepointsMonths) {
+          const dueAt = addMonths(started, months);
+          const past = dueAt.getTime() < Date.now();
+          await tx.stabilityPull.create({
+            data: {
+              tenantId: TENANT_ID,
+              studyId: study.id,
+              timepointMonths: months,
+              dueAt,
+              // Everything behind us was pulled and tested, except the 9-month
+              // point which was missed while the chamber was down. A study with
+              // no gaps in it is a study nobody has ever run.
+              status: !past ? 'SCHEDULED' : months === 9 ? 'MISSED' : 'COMPLETE',
+              pulledAt: past && months !== 9 ? dueAt : null,
+              pulledBy: past && months !== 9 ? analyst.id : null,
+              note:
+                months === 9
+                  ? 'Chamber 2 failed on the due date and samples were transferred to Chamber 1. ' +
+                    'The timepoint was not drawn within the permitted window; DEV/26/0022 refers.'
+                  : null,
+            },
+          });
+        }
+
+        console.log(
+          `    stability    ${stbProtocol.code} · ${study.studyNumber} · 8 timepoints (1 missed)`,
+        );
+      }
+
       console.log(`    workflow     ${orderSeq} AR numbers, ${reqSeq} sampling requests`);
       console.log('    dispositions 1 approved · 1 rejected (OOS) · 1 approved-with-deviation');
       console.log('    oos          OOS/26/0007 closed · OOS/26/0012 OPEN (dissolution, Phase I)');

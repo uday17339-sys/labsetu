@@ -133,6 +133,8 @@ export const PERMISSIONS = {
   CHANGE_READ: 'change:read',
   CHANGE_REQUEST: 'change:request',
   CHANGE_APPROVE: 'change:approve',
+  STABILITY_READ: 'stability:read',
+  STABILITY_MANAGE: 'stability:manage',
   /// Open, progress and close an out-of-specification investigation.
   OOS_MANAGE: 'oos:manage',
   /// Issue a certificate of analysis for a released batch.
@@ -355,6 +357,9 @@ export const DEFAULT_ROLES: Record<
     description:
       'Samples batches and performs the testing against specification. Produces results; does not decide their consequence for the batch.',
     permissions: [
+      PERMISSIONS.STABILITY_READ,
+      PERMISSIONS.STABILITY_MANAGE,
+
       PERMISSIONS.DEVIATION_READ,
       PERMISSIONS.DEVIATION_RAISE,
       PERMISSIONS.CAPA_READ,
@@ -388,6 +393,9 @@ export const DEFAULT_ROLES: Record<
     description:
       'Approves specifications, investigates out-of-specification results, and releases or rejects batches. Independent of the analyst who produced the result.',
     permissions: [
+      PERMISSIONS.STABILITY_READ,
+      PERMISSIONS.STABILITY_MANAGE,
+
       PERMISSIONS.DEVIATION_READ,
       PERMISSIONS.DEVIATION_RAISE,
       PERMISSIONS.DEVIATION_MANAGE,
@@ -438,6 +446,8 @@ export const DEFAULT_ROLES: Record<
     name: 'Auditor',
     description: 'Read-only access including the full audit trail. Changes nothing.',
     permissions: [
+      PERMISSIONS.STABILITY_READ,
+
       PERMISSIONS.DEVIATION_READ,
       PERMISSIONS.CAPA_READ,
       PERMISSIONS.CHANGE_READ,

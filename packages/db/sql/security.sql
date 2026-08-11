@@ -195,7 +195,10 @@ DECLARE
     -- Quality system. A deviation names what went wrong on a named batch and a
     -- CAPA names who is accountable for fixing it; both are as
     -- tenant-confidential as the batch record they hang off.
-    'deviation', 'capa_action', 'change_control'
+    'deviation', 'capa_action', 'change_control',
+    -- Stability data supports the expiry date printed on cartons already in the
+    -- market. It names what a competitor makes and how it behaves over time.
+    'stability_protocol', 'stability_study', 'stability_pull'
   ];
   tenant_col text;
 BEGIN

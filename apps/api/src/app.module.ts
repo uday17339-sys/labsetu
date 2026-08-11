@@ -22,6 +22,7 @@ import { TenantTransactionInterceptor } from './common/interceptors/tenant-trans
 import { ProblemDetailFilter } from './common/filters/problem-detail.filter';
 import { CONFIG, type AppConfig } from './config/configuration';
 import { QualityModule } from './modules/quality/quality.module';
+import { StabilityModule } from './modules/stability/stability.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { QualityModule } from './modules/quality/quality.module';
     }),
     AuthModule,
     QualityModule,
+    StabilityModule,
     CatalogModule,
     PatientsModule,
     WorkflowModule,

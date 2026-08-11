@@ -962,6 +962,7 @@ model Sample {
   containerType   ContainerType?   @relation(fields: [containerTypeId], references: [id])
   rejectionReason RejectionReason? @relation(fields: [rejectionReasonId], references: [id])
   tests           SampleTest[]
+  stabilityPull   StabilityPull?
 
   @@unique([tenantId, accessionNumber])
   @@index([tenantId, labId, status])
@@ -1933,6 +1934,7 @@ model MaterialBatch {
   samplingRequests SamplingRequest[]
   dispositions     BatchDisposition[]
   deviations       Deviation[]
+  stabilityStudies StabilityStudy[]
   investigations   OosInvestigation[]
   certificates     CertificateOfAnalysis[]
 
@@ -2493,5 +2495,143 @@ enum ChangeStatus {
   /// Implemented and its post-implementation review closed out.
   CLOSED
   REJECTED
+  CANCELLED
+}
+
+// =============================================================================
+// STABILITY STUDIES
+// =============================================================================
+//
+// ICH Q1A: a product's shelf life is a claim, and a stability study is the
+// evidence for it. The structure is a protocol (what will be tested, under
+// which conditions, at which intervals), a study per batch on that protocol,
+// and a pull per timepoint that becomes an ordinary sample when it is drawn.
+//
+// The pull is the part worth getting right. A timepoint that passes unnoticed
+// is not a missed task, it is a hole in the evidence supporting an expiry date
+// already printed on cartons in the market — so pulls are scheduled at study
+// start, and being overdue is a first-class state rather than something a
+// person has to notice.
+
+model StabilityProtocol {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  code     String
+  name     String
+
+  /// The condition, as the monograph states it: "25 °C / 60 % RH".
+  storageCondition String
+  studyType        StabilityStudyType @default(LONG_TERM)
+  /// Which orientation, where it matters — liquids in particular.
+  orientation      String?
+
+  /// Months from study start at which a pull is due, e.g. [0,3,6,9,12,18,24,36].
+  /// Stored as the protocol's own schedule rather than derived, because a
+  /// bracketing or matrixing design deliberately skips intervals.
+  timepointsMonths Int[]
+
+  /// Tests performed at each pull. A stability study rarely repeats the whole
+  /// release specification — it tests what can change.
+  testCodes String[]
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  studies StabilityStudy[]
+
+  @@unique([tenantId, code])
+  @@map("stability_protocol")
+}
+
+enum StabilityStudyType {
+  LONG_TERM
+  ACCELERATED
+  INTERMEDIATE
+  /// Deliberate stress to identify degradation pathways, not shelf-life data.
+  STRESS
+  /// Confirming a marketed product still behaves — one batch a year, typically.
+  ONGOING
+}
+
+model StabilityStudy {
+  id         String @id @default(uuid()) @db.Uuid
+  tenantId   String @db.Uuid
+  protocolId String @db.Uuid
+  batchId    String @db.Uuid
+
+  studyNumber String
+  startedAt   DateTime
+  /// Where the samples physically sit. An inspector asks to see the chamber.
+  chamber     String?
+
+  status       StabilityStatus @default(ONGOING)
+  /// Why it stopped early, where it did. A study abandoned without a reason is
+  /// indistinguishable from one everybody forgot about.
+  closedReason String?
+  closedAt     DateTime?
+
+  createdBy String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  protocol StabilityProtocol @relation(fields: [protocolId], references: [id])
+  batch    MaterialBatch     @relation(fields: [batchId], references: [id])
+  pulls    StabilityPull[]
+
+  @@unique([tenantId, studyNumber])
+  @@index([tenantId, status])
+  @@map("stability_study")
+}
+
+enum StabilityStatus {
+  ONGOING
+  COMPLETED
+  /// Stopped before the last timepoint, with a reason.
+  DISCONTINUED
+}
+
+/// One timepoint on one study.
+///
+/// Carries its own due date so the queue can age without recomputing from the
+/// study every time, and links to the sample once drawn — after which the pull
+/// is an ordinary QC sample and follows the same result, verify, authorise path
+/// as anything else. Stability data that lived in its own parallel world would
+/// be stability data nobody trusted.
+model StabilityPull {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  studyId  String @db.Uuid
+
+  timepointMonths Int
+  dueAt           DateTime
+  status          PullStatus @default(SCHEDULED)
+
+  pulledAt DateTime?
+  pulledBy String?   @db.Uuid
+  /// The sample the pull became. Null until drawn.
+  sampleId String?   @unique @db.Uuid
+
+  /// Recorded when a pull is missed or deliberately not taken. Required to move
+  /// out of SCHEDULED any way other than by drawing it.
+  note String?
+
+  study  StabilityStudy @relation(fields: [studyId], references: [id], onDelete: Cascade)
+  sample Sample?        @relation(fields: [sampleId], references: [id])
+
+  @@unique([studyId, timepointMonths])
+  @@index([tenantId, status, dueAt])
+  @@map("stability_pull")
+}
+
+enum PullStatus {
+  SCHEDULED
+  /// Drawn and submitted to the laboratory.
+  PULLED
+  /// Tested and within specification.
+  COMPLETE
+  /// The timepoint passed without a sample being drawn. Not deleted — a missed
+  /// pull is evidence about the study, and removing it hides the gap.
+  MISSED
+  /// Deliberately not taken, with a reason, e.g. the study was discontinued.
   CANCELLED
 }

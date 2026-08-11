@@ -176,6 +176,11 @@ export const AUDIT_ACTION = [
   'CHANGE_REQUESTED',
   'CHANGE_APPROVED',
   'CHANGE_IMPLEMENTED',
+  /// A stability study starting, a pull taken, a pull missed. The missed one
+  /// matters most: it is a hole in the evidence behind an expiry date.
+  'STABILITY_STUDY_STARTED',
+  'STABILITY_PULL_RECORDED',
+  'STABILITY_PULL_MISSED',
   'INGEST_RECEIVED',
   'POLICY_CHANGED',
 ] as const;
