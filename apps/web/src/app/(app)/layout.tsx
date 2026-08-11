@@ -59,7 +59,7 @@ const DIAGNOSTICS_ONLY = new Set([
 ]);
 
 /** Screens that only make sense for a pharma manufacturing deployment. */
-const PHARMA_ONLY = new Set(['/coa', '/specifications']);
+const PHARMA_ONLY = new Set(['/coa', '/specifications', '/quality']);
 
 const SECONDARY = [
   // Occasional but real work. Entries in DIAGNOSTICS_ONLY are dropped entirely
@@ -93,6 +93,13 @@ const SECONDARY = [
     permission: 'patient:read',
   },
   { href: '/reports', label: 'Reports', short: 'Reports', icon: 'doc', permission: 'report:read' },
+  {
+    href: '/quality',
+    label: 'Quality system',
+    short: 'Quality',
+    icon: 'shield',
+    permission: 'deviation:read',
+  },
   {
     href: '/coa',
     label: 'Certificates',

@@ -291,6 +291,11 @@ export class QualityService {
     }));
   }
 
+  /** The detail view, public so the screen can open one record. */
+  async getDeviation(id: string) {
+    return this.deviationView(id);
+  }
+
   private async deviationView(id: string) {
     const tx = this.prisma.tx;
     const d = await tx.deviation.findUniqueOrThrow({

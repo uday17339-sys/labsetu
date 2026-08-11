@@ -83,7 +83,13 @@ Ordered by what a plant and an inspector actually need, not by what is easy.
 
 ### P1 — The quality system the laboratory hangs off
 
-> **P1 complete.** 1.1 and 1.2 landed together — a CAPA with no deviation to
+> **P1 complete, with screens.** `/quality` carries three registers behind one
+> set of counters — open deviations, overdue actions, awaiting effectiveness,
+> changes to review — because that is the question a QA manager opens the
+> system to answer. Deviation detail is laid out as a narrative rather than a
+> form: what happened, what was found, what is being done.
+>
+> **P1 detail.** 1.1 and 1.2 landed together — a CAPA with no deviation to
 > hang off is not a quality system, and a deviation that cannot raise one is a
 > log. 1.3 followed, sharing the same CAPA register. 40 checks in
 > `quality-verify`.

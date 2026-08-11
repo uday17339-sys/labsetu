@@ -134,6 +134,12 @@ export class QualityController {
     return this.quality.listDeviations({ status, batchId });
   }
 
+  @RequirePermissions(PERMISSIONS.DEVIATION_READ)
+  @Get('deviations/:id')
+  getDeviation(@Param('id', ParseUUIDPipe) id: string) {
+    return this.quality.getDeviation(id);
+  }
+
   /**
    * Anyone who works on the floor can RAISE one. Deliberately a wide grant: a
    * deviation nobody felt able to report is the most expensive kind, and the
