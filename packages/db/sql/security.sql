@@ -191,7 +191,11 @@ DECLARE
     -- authenticate anyone, but it still says which accounts exist and how often
     -- they change credentials; access reviews name who audits whom. Both are
     -- tenant-confidential.
-    'password_history', 'access_review'
+    'password_history', 'access_review',
+    -- Quality system. A deviation names what went wrong on a named batch and a
+    -- CAPA names who is accountable for fixing it; both are as
+    -- tenant-confidential as the batch record they hang off.
+    'deviation', 'capa_action', 'change_control'
   ];
   tenant_col text;
 BEGIN

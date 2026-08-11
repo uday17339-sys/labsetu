@@ -1287,6 +1287,15 @@ async function seedWorkflow(): Promise<void> {
       const analyst = await tx.user.findFirstOrThrow({
         where: { email: 'qc@vantage.test', tenantId: TENANT_ID },
       });
+      // The deputies. The quality records deliberately spread across more than
+      // one person: a register where every entry names the same individual
+      // reads as one person doing the paperwork rather than a system running.
+      const qa2 = await tx.user.findFirstOrThrow({
+        where: { email: 'qa2@vantage.test', tenantId: TENANT_ID },
+      });
+      const analyst2 = await tx.user.findFirstOrThrow({
+        where: { email: 'qc2@vantage.test', tenantId: TENANT_ID },
+      });
       const stores = await tx.user.findFirstOrThrow({
         where: { email: 'stores@vantage.test', tenantId: TENANT_ID },
       });
@@ -1699,6 +1708,155 @@ async function seedWorkflow(): Promise<void> {
 
       // ------------------------------- 6. quarantine, awaiting sampling (no order)
       await bookBatch('ALU/26/0402', [], { status: 'PENDING', testStatus: 'PENDING', ago: 2 });
+
+      // ------------------------------------------------- quality system
+      //
+      // A plant always has quality work in flight. An empty deviation register
+      // says either that nothing ever goes wrong — which no inspector believes
+      // — or that nobody is writing it down, which is worse. The demo opens on
+      // a site that is on top of its work but not pretending to be perfect:
+      // one deviation closed properly, one still being investigated, and a CAPA
+      // completed but not yet due for its effectiveness check.
+      const devClosed = await tx.deviation.create({
+        data: {
+          tenantId: TENANT_ID,
+          deviationNumber: 'DEV/26/0031',
+          title: 'Dissolution bath temperature excursion during PT/26/0455 testing',
+          description:
+            'The water bath on DISS-01 was found at 38.4 °C against a set point of 37.0 ± 0.5 °C ' +
+            'at the 30-minute pull. The excursion was noticed by the analyst on the second ' +
+            'vessel check. Testing was stopped and the run abandoned.',
+          category: 'EQUIPMENT',
+          severity: 'MAJOR',
+          status: 'CLOSED',
+          productImpact: 'POTENTIAL',
+          occurredAt: daysAgo(12),
+          detectedAt: daysAgo(12),
+          reportedBy: analyst.id,
+          reportedAt: daysAgo(12),
+          investigation:
+            'Bath thermostat calibration verified against a reference thermometer: reading 1.4 °C ' +
+            'low. Service history reviewed — the unit was last serviced 14 months ago against a ' +
+            '12-month interval. No other runs were in progress during the excursion window.',
+          rootCause:
+            'Thermostat drift on DISS-01, undetected because the annual service had slipped by ' +
+            'two months and daily bath temperature was recorded from the unit display rather ' +
+            'than an independent thermometer.',
+          impactAssessment:
+            'Only the abandoned PT/26/0455 dissolution run was affected; it was repeated after ' +
+            'correction and complies. No released batch was tested during the excursion window.',
+          closedBy: qa.id,
+          closedAt: daysAgo(4),
+        },
+      });
+
+      const devOpen = await tx.deviation.create({
+        data: {
+          tenantId: TENANT_ID,
+          deviationNumber: 'DEV/26/0034',
+          title: 'Balance printout missing from raw data pack for AR U126080500004',
+          description:
+            'During review of the assay raw data pack the analytical balance printout for the ' +
+            'standard weighing was found to be absent. The weight is recorded in the worksheet ' +
+            'and the sequence is complete, but the printed slip is not attached.',
+          category: 'DOCUMENTATION',
+          status: 'UNDER_INVESTIGATION',
+          occurredAt: daysAgo(3),
+          detectedAt: daysAgo(1),
+          reportedBy: qa2.id,
+          reportedAt: daysAgo(1),
+          investigation:
+            'Analyst interviewed; balance printer roll was found empty on the day. Checking ' +
+            'whether the audit trail on the balance can supply the weighing record, and ' +
+            'reviewing whether other packs from the same week are affected.',
+        },
+      });
+
+      await tx.capaAction.createMany({
+        data: [
+          {
+            tenantId: TENANT_ID,
+            capaNumber: 'CAPA/26/0018',
+            title: 'Restore DISS-01 to its 12-month service interval and verify bath temperature',
+            description:
+              'Recalibrate the DISS-01 thermostat, return the unit to a 12-month service ' +
+              'schedule, and add an independent thermometer check to the daily bath log so a ' +
+              'drift is caught by something other than the instrument reporting on itself.',
+            kind: 'CORRECTIVE',
+            status: 'COMPLETED',
+            deviationId: devClosed.id,
+            ownerId: analyst.id,
+            dueAt: daysAgo(6),
+            completedBy: analyst.id,
+            completedAt: daysAgo(5),
+            completionNote:
+              'Thermostat recalibrated by the service engineer (certificate CAL/2026/DISS-01/007). ' +
+              'Daily log revised to record an independent thermometer reading alongside the ' +
+              'display. Service scheduled to the 12-month interval.',
+            // Deliberately still ahead of us: the demo shows a CAPA that is done
+            // but not yet proven, which is the state most of them live in.
+            effectivenessDueAt: daysAhead(25),
+            createdBy: qa.id,
+            createdAt: daysAgo(11),
+          },
+          {
+            tenantId: TENANT_ID,
+            capaNumber: 'CAPA/26/0019',
+            title: 'Second-person check that raw data packs are complete before QA review',
+            description:
+              'Add a completeness check to the analyst-to-QA handover so a missing printout is ' +
+              'caught at the bench rather than during review, and stock a spare printer roll at ' +
+              'each balance.',
+            kind: 'PREVENTIVE',
+            status: 'IN_PROGRESS',
+            deviationId: devOpen.id,
+            ownerId: analyst2.id,
+            dueAt: daysAhead(12),
+            effectivenessDueAt: daysAhead(75),
+            createdBy: qa2.id,
+            createdAt: daysAgo(1),
+          },
+        ],
+      });
+
+      const changeApproved = await tx.changeControl.create({
+        data: {
+          tenantId: TENANT_ID,
+          changeNumber: 'CC/26/0009',
+          title: 'Tighten the in-house assay limit for Paracetamol API to 99.0–101.0 %',
+          description:
+            'Align the in-house release limit for API-PCM assay with the IP monograph range ' +
+            'following the specification review.',
+          changeType: 'SPECIFICATION',
+          classification: 'MAJOR',
+          status: 'IMPLEMENTED',
+          justification:
+            'The in-house limit had been carried over from a USP-based specification. Aligning ' +
+            'with IP removes the discrepancy between the cited pharmacopoeia and the applied ' +
+            'limit, which an auditor would raise.',
+          impactAssessment:
+            'Reviewed the last 24 months of API-PCM assay results: all released batches fall ' +
+            'within the tighter range, so no historical batch would have been rejected under it. ' +
+            'No method change is required; the analytical procedure is unchanged.',
+          prerequisites:
+            'Specification reissued at the next version. QC analysts briefed at the shift ' +
+            'handover. No revalidation required as the method is unchanged.',
+          requestedBy: qa2.id,
+          requestedAt: daysAgo(30),
+          approvedBy: qa.id,
+          approvedAt: daysAgo(24),
+          approvalNote:
+            'Approved. The tighter limit is the registered one and the retrospective review ' +
+            'shows no impact on supply.',
+          implementedBy: qa2.id,
+          implementedAt: daysAgo(20),
+          implementationNote: 'Specification SPEC/API-PCM/01 reissued with the IP range.',
+        },
+      });
+
+      console.log(
+        `    quality      2 deviations (1 closed, 1 open) · 2 CAPAs · ${changeApproved.changeNumber} implemented`,
+      );
 
       console.log(`    workflow     ${orderSeq} AR numbers, ${reqSeq} sampling requests`);
       console.log('    dispositions 1 approved · 1 rejected (OOS) · 1 approved-with-deviation');

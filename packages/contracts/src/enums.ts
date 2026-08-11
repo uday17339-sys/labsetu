@@ -167,6 +167,15 @@ export const AUDIT_ACTION = [
   /// it. Recorded so the control is visibly operating, not merely configured.
   'PASSWORD_EXPIRED',
   'ACCESS_REVIEWED',
+  /// The quality-system thread: raised, closed, actioned, verified. Each is its
+  /// own verb because an assessor searches the trail for exactly these.
+  'DEVIATION_RAISED',
+  'DEVIATION_CLOSED',
+  'CAPA_RAISED',
+  'CAPA_VERIFIED',
+  'CHANGE_REQUESTED',
+  'CHANGE_APPROVED',
+  'CHANGE_IMPLEMENTED',
   'INGEST_RECEIVED',
   'POLICY_CHANGED',
 ] as const;

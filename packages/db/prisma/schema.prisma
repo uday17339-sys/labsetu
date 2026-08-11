@@ -1498,6 +1498,7 @@ model Device {
 
   lab         Lab                 @relation(fields: [labId], references: [id])
   channels    DeviceChannel[]
+  deviations  Deviation[]
   messages    InstrumentMessage[]
   results     Result[]
   qcResults   QcResult[]
@@ -1931,6 +1932,7 @@ model MaterialBatch {
   orders           LabOrder[]
   samplingRequests SamplingRequest[]
   dispositions     BatchDisposition[]
+  deviations       Deviation[]
   investigations   OosInvestigation[]
   certificates     CertificateOfAnalysis[]
 
@@ -2240,4 +2242,256 @@ model AccessReview {
 
   @@index([tenantId, reviewedAt])
   @@map("access_review")
+}
+
+// =============================================================================
+// QUALITY SYSTEM — DEVIATIONS, CAPA, CHANGE CONTROL
+// =============================================================================
+//
+// The thread an inspector pulls: something went wrong, it was investigated, an
+// action was taken, and somebody checked the action worked. Before this the
+// system could describe the problem (OOS) but the thread stopped at a text
+// field, which is where most findings are written.
+//
+// Deliberately one shared CAPA register rather than a CAPA per source. A
+// corrective action raised off a deviation and one raised off an OOS are the
+// same object to the person who has to close it, and splitting them is how a
+// site ends up with two overdue lists and no single view of either.
+
+/// Something that departed from a procedure, specification or expectation.
+///
+/// Distinct from an OOS: an OOS is a *result* outside its limits and is opened
+/// by the system. A deviation is anything else — a temperature excursion, a
+/// missed step, an equipment failure mid-run — and is raised by a person.
+model Deviation {
+  id              String @id @default(uuid()) @db.Uuid
+  tenantId        String @db.Uuid
+  deviationNumber String
+
+  title       String
+  description String
+  category    DeviationCategory
+  /// Set at closure, not at raising. Severity assigned before an investigation
+  /// is a guess, and a guess anchored early is the one that sticks.
+  severity    DeviationSeverity @default(UNCLASSIFIED)
+  status      DeviationStatus   @default(OPEN)
+
+  /// What it touched. All optional: a deviation may be about a room, a utility
+  /// or a procedure and touch no batch at all.
+  batchId  String? @db.Uuid
+  deviceId String? @db.Uuid
+  labId    String? @db.Uuid
+
+  /// When it happened, as against when somebody noticed. Both matter: the gap
+  /// between them is itself a finding.
+  occurredAt DateTime
+  detectedAt DateTime
+  reportedBy String   @db.Uuid
+  reportedAt DateTime @default(now())
+
+  investigation    String?
+  rootCause        String?
+  impactAssessment String?
+  /// The judgement that matters to a batch: was product quality affected?
+  productImpact    ProductImpact @default(NOT_ASSESSED)
+
+  closedBy String?   @db.Uuid
+  closedAt DateTime?
+
+  batch  MaterialBatch? @relation(fields: [batchId], references: [id])
+  device Device?        @relation(fields: [deviceId], references: [id])
+  capas  CapaAction[]
+
+  @@unique([tenantId, deviationNumber])
+  @@index([tenantId, status, occurredAt])
+  @@index([tenantId, batchId])
+  @@map("deviation")
+}
+
+enum DeviationCategory {
+  PROCESS
+  EQUIPMENT
+  DOCUMENTATION
+  UTILITY
+  MATERIAL
+  PERSONNEL
+  ENVIRONMENTAL
+  OTHER
+}
+
+enum DeviationSeverity {
+  UNCLASSIFIED
+  /// No impact on product quality; procedural only.
+  MINOR
+  /// Potential quality impact requiring assessment.
+  MAJOR
+  /// Product quality affected, or a repeat of a known issue.
+  CRITICAL
+}
+
+enum DeviationStatus {
+  OPEN
+  UNDER_INVESTIGATION
+  PENDING_APPROVAL
+  CLOSED
+  CANCELLED
+}
+
+enum ProductImpact {
+  NOT_ASSESSED
+  NONE
+  POTENTIAL
+  CONFIRMED
+}
+
+/// A corrective or preventive action, with an owner, a due date, and a check
+/// that it actually worked.
+///
+/// Effectiveness is the half that gets dropped. An action marked "done" with no
+/// verification is a promise, and repeat deviations are what an inspector uses
+/// to prove the promise was empty — so closure requires an effectiveness check
+/// and the check has its own due date.
+model CapaAction {
+  id         String @id @default(uuid()) @db.Uuid
+  tenantId   String @db.Uuid
+  capaNumber String
+
+  title       String
+  description String
+  kind        CapaKind
+  status      CapaStatus @default(OPEN)
+
+  /// Where it came from. Exactly one is expected, but the column is not a
+  /// constraint: a CAPA can also be raised from an audit finding or a trend,
+  /// neither of which is a record in this system yet.
+  deviationId     String? @db.Uuid
+  oosId           String? @db.Uuid
+  changeControlId String? @db.Uuid
+
+  ownerId String   @db.Uuid
+  dueAt   DateTime
+
+  completedBy    String?   @db.Uuid
+  completedAt    DateTime?
+  completionNote String?
+
+  /// The proof. Separate dates because verifying effectiveness weeks after the
+  /// action is the whole point — checking on the same day proves nothing.
+  effectivenessDueAt     DateTime?
+  effectivenessCheckedBy String?               @db.Uuid
+  effectivenessCheckedAt DateTime?
+  effectivenessVerdict   EffectivenessVerdict?
+  effectivenessNote      String?
+
+  createdBy String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  deviation     Deviation?     @relation(fields: [deviationId], references: [id])
+  changeControl ChangeControl? @relation(fields: [changeControlId], references: [id])
+
+  @@unique([tenantId, capaNumber])
+  @@index([tenantId, status, dueAt])
+  @@index([tenantId, deviationId])
+  @@map("capa_action")
+}
+
+enum CapaKind {
+  CORRECTION
+  CORRECTIVE
+  PREVENTIVE
+}
+
+enum CapaStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+  /// Action done AND its effectiveness verified. The only terminal success.
+  VERIFIED
+  CANCELLED
+}
+
+enum EffectivenessVerdict {
+  EFFECTIVE
+  NOT_EFFECTIVE
+  TOO_EARLY_TO_TELL
+}
+
+/// A proposed change to anything under control: a specification, a method, an
+/// instrument, a system, a supplier.
+///
+/// The record exists to answer "who approved this, on what assessment, and what
+/// happened afterwards" — the question asked when a batch made after the change
+/// behaves differently from one made before it.
+model ChangeControl {
+  id           String @id @default(uuid()) @db.Uuid
+  tenantId     String @db.Uuid
+  changeNumber String
+
+  title          String
+  description    String
+  changeType     ChangeType
+  /// Classification drives the approval path in a real QMS. Recorded here so
+  /// the path taken is auditable even where the routing is manual.
+  classification ChangeClassification @default(UNCLASSIFIED)
+  status         ChangeStatus         @default(DRAFT)
+
+  justification    String
+  impactAssessment String?
+  /// What must be true before the change is implemented — revalidation,
+  /// retraining, document updates.
+  prerequisites    String?
+
+  requestedBy String   @db.Uuid
+  requestedAt DateTime @default(now())
+
+  approvedBy   String?   @db.Uuid
+  approvedAt   DateTime?
+  approvalNote String?
+
+  implementedBy      String?   @db.Uuid
+  implementedAt      DateTime?
+  implementationNote String?
+
+  /// Post-implementation review: did the change do what it claimed, without
+  /// doing anything it did not claim?
+  reviewedBy String?   @db.Uuid
+  reviewedAt DateTime?
+  reviewNote String?
+
+  rejectedReason String?
+
+  capas CapaAction[]
+
+  @@unique([tenantId, changeNumber])
+  @@index([tenantId, status, requestedAt])
+  @@map("change_control")
+}
+
+enum ChangeType {
+  SPECIFICATION
+  METHOD
+  EQUIPMENT
+  PROCESS
+  DOCUMENT
+  SUPPLIER
+  SYSTEM
+  OTHER
+}
+
+enum ChangeClassification {
+  UNCLASSIFIED
+  MINOR
+  MAJOR
+  CRITICAL
+}
+
+enum ChangeStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  IMPLEMENTED
+  /// Implemented and its post-implementation review closed out.
+  CLOSED
+  REJECTED
+  CANCELLED
 }

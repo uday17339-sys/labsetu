@@ -83,13 +83,16 @@ Ordered by what a plant and an inspector actually need, not by what is easy.
 
 ### P1 — The quality system the laboratory hangs off
 
+> 1.1 and 1.2 landed together: a CAPA with no deviation to hang off is not a
+> quality system, and a deviation that cannot raise one is a log.
+
 Without these, an inspector cannot follow the thread from a problem to its
 resolution, which is the thread they always pull.
 
 | # | Item | Why it matters | State |
 |---|---|---|---|
-| 1.1 | **Deviation management** | Today a deviation is a free-text reference on a disposition. It needs to be a record: raised, classified, investigated, impact-assessed, closed, and linked to the batches it touched | ☐ To do |
-| 1.2 | **CAPA** | Corrective and preventive actions, owners, due dates, effectiveness checks, and links back to the deviation or OOS that caused them. OOS currently closes into a text field and stops | ☐ To do |
+| 1.1 | **Deviation management** | A deviation must be a record, not a free-text reference on a disposition | ✅ **Done** — raised by anyone on the floor (deliberately wide), investigated, classified at closure, linked to batch and instrument, aged in the queue. Closing requires an investigation and a root cause; a deviation with product impact cannot close without a CAPA. Detection lag is recorded because the gap between an event and anyone noticing is itself a finding |
+| 1.2 | **CAPA** | Actions with owners, due dates and a check that they worked | ✅ **Done** — one shared register across deviations, OOS and change control; an orphan CAPA is refused; effectiveness cannot be certified the day the action was completed; a NOT_EFFECTIVE verdict reopens rather than closes. `CAPA_VERIFY` is separate from `CAPA_MANAGE` so the person who did the work is not the one certifying it worked |
 | 1.3 | **Change control** | Any change to a specification, method, instrument or system needs a request, impact assessment, approval and implementation record. Schedule M and Annex 11 both require it | ☐ To do |
 
 ### P2 — Manufacturing QC breadth

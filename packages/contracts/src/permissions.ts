@@ -116,6 +116,23 @@ export const PERMISSIONS = {
   /// Release or reject a batch. The gate between the laboratory and the
   /// factory floor, and the reason QA exists as a role separate from QC.
   BATCH_DISPOSITION: 'batch:disposition',
+
+  // --- quality system ---
+  DEVIATION_READ: 'deviation:read',
+  /// Deliberately wide. A deviation nobody felt able to report is the most
+  /// expensive kind; the controls that matter are on closing one, not on
+  /// noticing it.
+  DEVIATION_RAISE: 'deviation:raise',
+  DEVIATION_MANAGE: 'deviation:manage',
+  DEVIATION_CLOSE: 'deviation:close',
+  CAPA_READ: 'capa:read',
+  CAPA_MANAGE: 'capa:manage',
+  /// Separate from CAPA_MANAGE: whoever did the work should not be the one
+  /// certifying it worked. Same reasoning as four-eyes on a result.
+  CAPA_VERIFY: 'capa:verify',
+  CHANGE_READ: 'change:read',
+  CHANGE_REQUEST: 'change:request',
+  CHANGE_APPROVE: 'change:approve',
   /// Open, progress and close an out-of-specification investigation.
   OOS_MANAGE: 'oos:manage',
   /// Issue a certificate of analysis for a released batch.
@@ -316,6 +333,9 @@ export const DEFAULT_ROLES: Record<
     description:
       'Receives raw materials and holds finished product. Books goods in, moves stock, and requests QC sampling. Cannot release material — that is QA.',
     permissions: [
+      PERMISSIONS.DEVIATION_READ,
+      PERMISSIONS.DEVIATION_RAISE,
+
       PERMISSIONS.STORES_READ,
       PERMISSIONS.STORES_MANAGE,
       PERMISSIONS.SAMPLING_REQUEST,
@@ -335,6 +355,11 @@ export const DEFAULT_ROLES: Record<
     description:
       'Samples batches and performs the testing against specification. Produces results; does not decide their consequence for the batch.',
     permissions: [
+      PERMISSIONS.DEVIATION_READ,
+      PERMISSIONS.DEVIATION_RAISE,
+      PERMISSIONS.CAPA_READ,
+      PERMISSIONS.CHANGE_READ,
+
       PERMISSIONS.STORES_READ,
       PERMISSIONS.SAMPLING_PERFORM,
       PERMISSIONS.SPEC_READ,
@@ -363,6 +388,17 @@ export const DEFAULT_ROLES: Record<
     description:
       'Approves specifications, investigates out-of-specification results, and releases or rejects batches. Independent of the analyst who produced the result.',
     permissions: [
+      PERMISSIONS.DEVIATION_READ,
+      PERMISSIONS.DEVIATION_RAISE,
+      PERMISSIONS.DEVIATION_MANAGE,
+      PERMISSIONS.DEVIATION_CLOSE,
+      PERMISSIONS.CAPA_READ,
+      PERMISSIONS.CAPA_MANAGE,
+      PERMISSIONS.CAPA_VERIFY,
+      PERMISSIONS.CHANGE_READ,
+      PERMISSIONS.CHANGE_REQUEST,
+      PERMISSIONS.CHANGE_APPROVE,
+
       PERMISSIONS.STORES_READ,
       PERMISSIONS.SAMPLING_REQUEST,
       PERMISSIONS.SPEC_READ,
@@ -402,6 +438,10 @@ export const DEFAULT_ROLES: Record<
     name: 'Auditor',
     description: 'Read-only access including the full audit trail. Changes nothing.',
     permissions: [
+      PERMISSIONS.DEVIATION_READ,
+      PERMISSIONS.CAPA_READ,
+      PERMISSIONS.CHANGE_READ,
+
       PERMISSIONS.PATIENT_READ,
       PERMISSIONS.ORDER_READ,
       PERMISSIONS.SAMPLE_READ,

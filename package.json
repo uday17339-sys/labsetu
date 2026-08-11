@@ -45,6 +45,7 @@
     "walkthrough": "node scripts/owner-walkthrough.mjs",
     "db:seed-pharma": "npm run seed-pharma -w @labsetu/db",
     "verify:pharma": "node scripts/pharma-verify.mjs",
+    "verify:quality": "node scripts/quality-verify.mjs",
     "audit:features": "node scripts/feature-audit.mjs",
     "vercel:build:api": "prisma generate --schema packages/db/prisma/schema.prisma && npm run build -w @labsetu/contracts && npm run build -w @labsetu/crypto && npm run build -w @labsetu/db && tsc -p apps/api/tsconfig.json",
     "vercel:build:web": "prisma generate --schema packages/db/prisma/schema.prisma && npm run build -w @labsetu/contracts && npm run build -w @labsetu/crypto && npm run build -w @labsetu/db && npm run build -w @labsetu/web",

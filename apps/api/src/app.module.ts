@@ -21,6 +21,7 @@ import { PermissionsGuard } from './common/rbac/permissions.guard';
 import { TenantTransactionInterceptor } from './common/interceptors/tenant-transaction.interceptor';
 import { ProblemDetailFilter } from './common/filters/problem-detail.filter';
 import { CONFIG, type AppConfig } from './config/configuration';
+import { QualityModule } from './modules/quality/quality.module';
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { CONFIG, type AppConfig } from './config/configuration';
       }),
     }),
     AuthModule,
+    QualityModule,
     CatalogModule,
     PatientsModule,
     WorkflowModule,
