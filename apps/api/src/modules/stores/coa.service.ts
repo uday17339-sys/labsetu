@@ -204,6 +204,30 @@ export class CoaService {
       orderBy: { decidedAt: 'desc' },
     });
 
+    // decidedBy is a plain column rather than a relation, so the decider is
+    // fetched directly. Adding a foreign key purely to render a name would be a
+    // migration on a table the database refuses to UPDATE or DELETE.
+    const decider = disposition
+      ? await tx.user.findUnique({
+          where: { id: disposition.decidedBy },
+          select: { fullName: true, qualification: true, registrationNo: true },
+        })
+      : null;
+
+    // 21 CFR 11.50: a signed electronic record must DISPLAY the printed name of
+    // the signer, the date and time of signing, and the meaning of the
+    // signature. The certificate previously asserted "released under electronic
+    // signature" and showed none of the three — the signature existed and was
+    // sound, it simply was not manifested on the document that leaves the site,
+    // which is the only place an auditor or a customer ever looks.
+    const releaseSignature = await tx.signature.findFirst({
+      where: { entityType: 'MaterialBatch', entityId: coa.batchId },
+      orderBy: { signedAt: 'desc' },
+      include: {
+        user: { select: { fullName: true, qualification: true, registrationNo: true } },
+      },
+    });
+
     return {
       id: coa.id,
       coaNumber: coa.coaNumber,
@@ -250,6 +274,23 @@ export class CoaService {
             rationale: disposition.rationale,
             deviationRef: disposition.deviationRef,
             decidedAt: disposition.decidedAt.toISOString(),
+            decidedBy: decider?.fullName ?? null,
+          }
+        : null,
+      /**
+       * The signature manifestation, or null when the batch was released before
+       * signatures were captured. Null is rendered as an explicit statement on
+       * the certificate rather than an empty space — a certificate that is
+       * silent about its own signature invites the reader to assume the best.
+       */
+      signature: releaseSignature
+        ? {
+            signedBy: releaseSignature.user.fullName,
+            qualification: releaseSignature.user.qualification,
+            registrationNo: releaseSignature.user.registrationNo,
+            meaning: releaseSignature.meaning,
+            signedAt: releaseSignature.signedAt.toISOString(),
+            method: releaseSignature.method,
           }
         : null,
       conclusion:

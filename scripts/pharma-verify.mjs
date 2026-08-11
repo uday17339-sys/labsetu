@@ -757,6 +757,43 @@ unopenable.length === 0
   : bad('all worklist tests open', unopenable.slice(0, 5).join(', '));
 
 // ===========================================================================
+section('The certificate manifests its signature (21 CFR 11.50)');
+
+// A signature that exists in the database but does not appear on the document
+// is not a manifestation. 11.50 asks for three things by name, so all three are
+// asserted separately — a certificate that showed only a date would otherwise
+// pass a looser check.
+// The released batch, not the rejected one — a certificate cannot exist for a
+// batch that was refused, and the suite proves that separately above.
+const sigDoc =
+  coa.status < 300
+    ? await api('GET', `/qa/coa/${coa.body.id}`, { token: qa.accessToken })
+    : { body: null };
+
+const manifest = sigDoc.body?.signature ?? null;
+manifest
+  ? ok('the certificate carries a signature manifestation', manifest.signedBy)
+  : bad('signature manifested on the CoA', 'no signature block on the certificate');
+
+manifest?.signedBy
+  ? ok('it names the signer', manifest.signedBy)
+  : bad('printed name of the signer', 'missing');
+
+manifest?.signedAt && !Number.isNaN(Date.parse(manifest.signedAt))
+  ? ok('it carries the date and time of signing', manifest.signedAt.slice(0, 16).replace('T', ' '))
+  : bad('date and time of signing', `got ${manifest?.signedAt}`);
+
+manifest?.meaning
+  ? ok('it states what the signature meant', manifest.meaning)
+  : bad('meaning of the signature', 'missing');
+
+// The disposition names its decider too, so the release is attributable without
+// cross-referencing the audit trail.
+sigDoc.body?.disposition?.decidedBy
+  ? ok('the disposition names who released the batch', sigDoc.body.disposition.decidedBy)
+  : bad('release attributable on the certificate', 'decidedBy absent');
+
+// ===========================================================================
 console.log(`\n\x1b[1m${passed} passed, ${failures.length} failed\x1b[0m`);
 if (failures.length > 0) {
   console.log('\n\x1b[31mFailures:\x1b[0m');

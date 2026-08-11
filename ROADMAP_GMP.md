@@ -76,7 +76,7 @@ Ordered by what a plant and an inspector actually need, not by what is easy.
 
 | # | Item | Why it matters | State |
 |---|---|---|---|
-| 0.1 | **Signature manifestation on the CoA** | 21 CFR §11.50 requires the printed name of the signer, the date and time of signing, and the meaning to appear on the signed record. The CoA currently says "released under electronic signature" and shows none of it — the API does not even return the signer | ☐ To do |
+| 0.1 | **Signature manifestation on the CoA** | 21 CFR §11.50 requires the printed name of the signer, the date and time of signing, and the meaning to appear on the signed record | ✅ **Done** — certificate now shows signer, qualification, registration number, signing time and meaning; a release without a signature says so explicitly rather than leaving a blank. Five assertions in `pharma-verify` |
 | 0.2 | **Enforce instrument calibration** | `calibrationDueAt` exists on the device and is read by nothing. An instrument past calibration can produce results that get authorised. Using uncalibrated equipment invalidates the data — a standard inspection finding | ☐ To do |
 | 0.3 | **Password aging, reuse history, access review** | §11.300 expects periodic password change, reuse prevention, and periodic review of who holds what | ☐ To do |
 

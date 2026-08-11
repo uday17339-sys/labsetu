@@ -35,11 +35,20 @@ interface Coa {
     verdict: string;
     isCritical: boolean;
   }[];
+  signature: {
+    signedBy: string;
+    qualification: string | null;
+    registrationNo: string | null;
+    meaning: string;
+    signedAt: string;
+    method: string;
+  } | null;
   disposition: {
     decision: string;
     rationale: string;
     deviationRef: string | null;
     decidedAt: string;
+    decidedBy: string | null;
   } | null;
   conclusion: string;
 }
@@ -174,11 +183,50 @@ export default async function CoaPage({ params }: { params: Promise<{ id: string
             )}
           </div>
 
+          {/*
+            21 CFR 11.50. A signed electronic record has to show three things:
+            who signed it, when, and what the signature meant. "Released under
+            electronic signature" satisfies none of them, and this is the page a
+            customer and an auditor actually read.
+          */}
           <div className="border-t border-ink-200 pt-3">
-            <p className="text-xs text-ink-500">
-              Released by Quality Assurance under electronic signature. This certificate is
-              generated from the laboratory record and is valid without a manual signature.
-            </p>
+            {coa.signature ? (
+              <div className="rounded-md border border-ink-200 bg-ink-50 px-3 py-2">
+                <p className="text-[11px] uppercase tracking-wide text-ink-500">
+                  Electronic signature
+                </p>
+                <p className="mt-1 text-sm font-medium text-ink-900">
+                  {coa.signature.signedBy}
+                  {coa.signature.qualification && (
+                    <span className="font-normal text-ink-600"> · {coa.signature.qualification}</span>
+                  )}
+                </p>
+                {coa.signature.registrationNo && (
+                  <p className="numeric text-xs text-ink-600">
+                    Registration {coa.signature.registrationNo}
+                  </p>
+                )}
+                <p className="mt-1 text-xs text-ink-700">
+                  Signed as{' '}
+                  <span className="font-medium">
+                    {coa.signature.meaning.replace(/_/g, ' ').toLowerCase()}
+                  </span>{' '}
+                  on <span className="numeric">{dateTime(coa.signature.signedAt)}</span>
+                </p>
+                <p className="mt-1 text-[11px] text-ink-500">
+                  Applied by re-authentication and bound to the content hash below. This
+                  certificate is generated from the laboratory record and is valid without a
+                  manual signature.
+                </p>
+              </div>
+            ) : (
+              /* Said plainly rather than left blank. A certificate silent about
+                 its own signature invites the reader to assume there was one. */
+              <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                No electronic signature is recorded against this release. This certificate
+                reproduces the laboratory record but does not carry a signature manifestation.
+              </p>
+            )}
             {coa.contentHash && (
               <p className="numeric mt-1 break-all text-[10px] text-ink-400">
                 Content hash {coa.contentHash}
