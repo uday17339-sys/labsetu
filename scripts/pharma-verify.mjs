@@ -733,6 +733,30 @@ entries.some((e) => JSON.stringify(e.after ?? {}).includes('QA_DISPOSITION'))
   : bad('disposition audited', `status ${dispositionAudit.status}, ${entries.length} entries, ${JSON.stringify(dispositionAudit.body ?? {}).slice(0, 140)}`);
 
 // ===========================================================================
+section('Every booked test opens');
+
+// The screen a bench analyst reaches by tapping a row. This walks the whole
+// worklist rather than sampling it, because the failure it guards against is
+// per-record: a result bound to another tenant's analyte reads fine in the list
+// and throws only when the detail page loads the relation. RLS then correctly
+// hides the foreign row, Prisma finds a required relation missing, and the
+// analyst gets "Something went wrong" on the one screen they work in.
+const fullWorklist = await api('GET', '/worklist?limit=100', { token: qc.accessToken });
+const wlItems = fullWorklist.body?.items ?? [];
+wlItems.length > 0
+  ? ok('worklist returns work to do', `${wlItems.length} tests`)
+  : bad('worklist populated', JSON.stringify(fullWorklist.body).slice(0, 120));
+
+const unopenable = [];
+for (const t of wlItems) {
+  const detail = await api('GET', `/tests/${t.id}`, { token: qc.accessToken });
+  if (detail.status !== 200) unopenable.push(`${t.id.slice(0, 8)}: ${detail.status}`);
+}
+unopenable.length === 0
+  ? ok('every test on the worklist opens', `${wlItems.length} detail pages, all 200`)
+  : bad('all worklist tests open', unopenable.slice(0, 5).join(', '));
+
+// ===========================================================================
 console.log(`\n\x1b[1m${passed} passed, ${failures.length} failed\x1b[0m`);
 if (failures.length > 0) {
   console.log('\n\x1b[31mFailures:\x1b[0m');

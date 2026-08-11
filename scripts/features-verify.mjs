@@ -79,6 +79,37 @@ async function main() {
   // =========================================================== INVENTORY
   section('Inventory — stock and alerts');
 
+  // Book in a fresh vial of the reference standard first.
+  //
+  // This suite consumes 25 mg of it per run through the assay, and the seeded
+  // vial holds 500. After twenty runs the lot is empty and every consumption
+  // check fails — which reads as broken FEFO and broken auto-consumption when
+  // the truth is that the system correctly refused to issue stock that is not
+  // there. A suite that depends on how many times it has been run before is
+  // measuring its own history, not the product.
+  const stockAdmin = await login('admin@vantage.test');
+  const preItems = await api('GET', '/inventory/items', { token: tech.accessToken });
+  const stdItem = (preItems.body ?? []).find((i) => i.code === 'STD-PCM-RS');
+  if (stdItem) {
+    const topUp = await api('POST', '/inventory/receive', {
+      token: stockAdmin.accessToken,
+      body: {
+        itemId: stdItem.id,
+        lotNumber: `IPRS/PCM/RUN-${Date.now().toString().slice(-6)}`,
+        quantity: 500,
+        // Dated well beyond the seeded vial on purpose. FEFO must still draw
+        // the older one first, and giving the two lots near-identical expiries
+        // would make the assertion depend on how a tie is broken rather than on
+        // first-expiry-first-out actually working.
+        expiryDate: new Date(Date.now() + 400 * 864e5).toISOString().slice(0, 10),
+        supplier: 'IPC Ghaziabad',
+      },
+    });
+    topUp.status < 300
+      ? ok('a fresh vial of reference standard booked in', '500 mg, so the run does not depend on leftovers')
+      : bad('top up the reference standard', `${topUp.status} ${JSON.stringify(topUp.body).slice(0, 110)}`);
+  }
+
   const items = await api('GET', '/inventory/items', { token: tech.accessToken });
   items.status === 200 && items.body.length > 0
     ? ok('inventory items configured', `${items.body.length} items`)
@@ -288,8 +319,8 @@ async function main() {
   // you run it on? The lot ledger has to answer it without anyone having kept a
   // separate notebook.
   const afterItems = await api('GET', '/inventory/items', { token: tech.accessToken });
-  const stdItem = afterItems.body.find((i) => i.code === 'STD-PCM-RS');
-  const drawnLot = stdItem.lots
+  const drawnItem = afterItems.body.find((i) => i.code === 'STD-PCM-RS');
+  const drawnLot = drawnItem.lots
     .filter((l) => !l.isExpired)
     .sort((a, b) => (a.expiryDate ?? '').localeCompare(b.expiryDate ?? ''))[0];
 

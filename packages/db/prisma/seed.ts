@@ -1270,22 +1270,42 @@ async function seedWorkflow(): Promise<void> {
     async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${TENANT_ID}, true)`;
 
-      const unit = await tx.lab.findFirstOrThrow({ where: { code: 'U1' } });
-      const qa = await tx.user.findFirstOrThrow({ where: { email: 'qa@vantage.test' } });
-      const analyst = await tx.user.findFirstOrThrow({ where: { email: 'qc@vantage.test' } });
-      const stores = await tx.user.findFirstOrThrow({ where: { email: 'stores@vantage.test' } });
+      const unit = await tx.lab.findFirstOrThrow({ where: { code: 'U1', tenantId: TENANT_ID } });
+      const qa = await tx.user.findFirstOrThrow({
+        where: { email: 'qa@vantage.test', tenantId: TENANT_ID },
+      });
+      const analyst = await tx.user.findFirstOrThrow({
+        where: { email: 'qc@vantage.test', tenantId: TENANT_ID },
+      });
+      const stores = await tx.user.findFirstOrThrow({
+        where: { email: 'stores@vantage.test', tenantId: TENANT_ID },
+      });
 
       const batchByNumber = async (n: string) =>
-        tx.materialBatch.findFirstOrThrow({ where: { batchNumber: n }, include: { material: true } });
+        tx.materialBatch.findFirstOrThrow({
+          where: { batchNumber: n, tenantId: TENANT_ID },
+          include: { material: true },
+        });
 
       const testByCode = async (c: string) =>
         tx.testDefinition.findFirstOrThrow({
-          where: { code: c },
+          where: { tenantId: TENANT_ID, code: c },
           include: { analytes: { include: { analyte: true }, orderBy: { sortOrder: 'asc' } } },
         });
 
+      /**
+       * Scoped to the tenant being seeded, explicitly.
+       *
+       * Leaving the tenant out relies on row-level security to disambiguate,
+       * and the seed is the one caller that cannot rely on it: it runs as a
+       * privileged role that bypasses RLS, and on a database that already holds
+       * another tenant it silently bound results to THAT tenant's analyte with
+       * the same code. The rows looked fine; every read then failed, because
+       * RLS correctly hid the foreign analyte and Prisma found a required
+       * relation missing. Analyte codes are unique per tenant, not globally.
+       */
       const analyteByCode = async (c: string) =>
-        tx.analyte.findFirstOrThrow({ where: { code: c } });
+        tx.analyte.findFirstOrThrow({ where: { code: c, tenantId: TENANT_ID } });
 
       let orderSeq = 0;
       let arSeq = 0;
@@ -1466,7 +1486,9 @@ async function seedWorkflow(): Promise<void> {
           },
         });
 
-        const spec = await tx.specification.findFirstOrThrow({ where: { code: 'SPEC/API-PCM/01' } });
+        const spec = await tx.specification.findFirstOrThrow({
+          where: { code: 'SPEC/API-PCM/01', tenantId: TENANT_ID },
+        });
         await tx.certificateOfAnalysis.create({
           data: {
             tenantId: TENANT_ID,
