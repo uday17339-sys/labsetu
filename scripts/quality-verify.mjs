@@ -795,6 +795,98 @@ async function main() {
     ? ok('generating a review is audited', 'PQR_GENERATED')
     : bad('PQR audited', JSON.stringify(pqrAudit.body).slice(0, 110));
 
+  // ================================================ audit-trail review
+  section('Audit-trail review (Annex 11)');
+
+  const revFrom = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const revTo = new Date().toISOString().slice(0, 10);
+
+  const prep = await api(
+    'GET',
+    `/compliance/audit-review/prepare?from=${revFrom}&to=${revTo}`,
+    { token: qa.accessToken },
+  );
+  prep.status === 200 && prep.body.entries > 0
+    ? ok('a review can be prepared for a period', `${prep.body.entries} entries`)
+    : bad('prepare review', JSON.stringify(prep.body).slice(0, 130));
+
+  // A date-only bound means the WHOLE of that day. Parsed literally it is
+  // midnight at the start, which silently excluded everything from today —
+  // the part a reviewer most wants to see. This is the regression guard.
+  prep.body?.entries > 0
+    ? ok("'up to today' includes today", 'date-only bounds run to end of day')
+    : bad('end-of-day bound', 'entries from today were excluded');
+
+  prep.body?.fromSeq && prep.body?.toSeq
+    ? ok('the sequence range examined is named', `seq ${prep.body.fromSeq}–${prep.body.toSeq}`)
+    : bad('sequence range', 'not reported');
+
+  Array.isArray(prep.body?.attention)
+    ? ok('entries needing justification are surfaced', `${prep.body.attention.length} flagged`)
+    : bad('attention list', 'absent');
+
+  const thinReview = await api('POST', '/compliance/audit-review', {
+    token: qa.accessToken,
+    body: { from: revFrom, to: revTo, findings: 'Looked at it.' },
+  });
+  thinReview.status >= 400
+    ? ok('a one-line audit review is REFUSED', 'an assessor reads the findings')
+    : bad('findings substantive', `${thinReview.status}`);
+
+  const emptyPeriod = await api('POST', '/compliance/audit-review', {
+    token: qa.accessToken,
+    body: {
+      from: '2020-01-01',
+      to: '2020-01-31',
+      findings: 'Reviewing a period in which this system did not yet exist, to prove it refuses.',
+    },
+  });
+  emptyPeriod.status >= 400
+    ? ok('a review of an empty period is REFUSED', 'a review of nothing is not a review')
+    : bad('empty period refused', `${emptyPeriod.status}`);
+
+  const reviewRecorded = await api('POST', '/compliance/audit-review', {
+    token: qa.accessToken,
+    body: {
+      from: revFrom,
+      to: revTo,
+      findings:
+        'Reviewed all entries for the period with particular attention to overrides, ' +
+        'amendments and failed sign-ins. No unexplained activity identified.',
+      followUp: 'None required.',
+    },
+  });
+  reviewRecorded.status < 300 && reviewRecorded.body.entriesReviewed > 0
+    ? ok(
+        'a documented review is recorded',
+        `${reviewRecorded.body.entriesReviewed} entries, seq ${reviewRecorded.body.fromSeq}–${reviewRecorded.body.toSeq}`,
+      )
+    : bad('record review', `${reviewRecorded.status} ${JSON.stringify(reviewRecorded.body).slice(0, 120)}`);
+
+  const state = await api('GET', '/compliance/audit-review', { token: qa.accessToken });
+  state.body?.isOverdue === false && state.body?.nextDueAt
+    ? ok('recording clears the overdue state', `next due ${state.body.nextDueAt.slice(0, 10)}`)
+    : bad('overdue cleared', JSON.stringify(state.body).slice(0, 120));
+
+  const qcSignoff = await api('POST', '/compliance/audit-review', {
+    token: qc.accessToken,
+    body: {
+      from: revFrom,
+      to: revTo,
+      findings: 'An analyst should not be able to sign off that the audit trail was reviewed.',
+    },
+  });
+  qcSignoff.status === 403
+    ? ok('the bench cannot sign off an audit review', '403 — needs audit:verify')
+    : bad('review sign-off permissioned', `${qcSignoff.status}`);
+
+  const revAudit = await api('GET', '/compliance/audit?action=AUDIT_TRAIL_REVIEWED&limit=5', {
+    token: admin.accessToken,
+  });
+  (revAudit.body?.items ?? []).length > 0
+    ? ok('reviewing the trail is itself audited', 'AUDIT_TRAIL_REVIEWED')
+    : bad('review audited', JSON.stringify(revAudit.body).slice(0, 110));
+
   // =========================================================== audit trail
   section('The thread is in the audit trail');
 

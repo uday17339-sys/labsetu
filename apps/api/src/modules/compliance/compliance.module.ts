@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Header,
@@ -6,6 +7,7 @@ import {
   Module,
   Param,
   ParseUUIDPipe,
+  Post,
   Query,
   Res,
 } from '@nestjs/common';
@@ -16,6 +18,10 @@ import { AuditService } from '../../common/audit/audit.service';
 import { RequirePermissions } from '../../common/rbac/permissions.decorator';
 import { RequestContextStore } from '../../common/context/request-context';
 import { ExportService } from './export.service';
+import { z } from 'zod';
+import { AuditReviewService } from './audit-review.service';
+import { zodPipe } from '../../common/pipes/zod-validation.pipe';
+import { endOfDay, startOfDay } from '../../common/dates/range';
 
 @Injectable()
 class ComplianceService {
@@ -189,9 +195,22 @@ class ComplianceService {
   }
 }
 
+const auditReviewSchema = z.object({
+  from: z.string().min(8),
+  to: z.string().min(8),
+  findings: z
+    .string()
+    .trim()
+    .min(30, 'Record what was examined and what was concluded - an assessor reads this'),
+  followUp: z.string().trim().max(2000).optional(),
+});
+
 @Controller({ path: 'compliance', version: '1' })
 class ComplianceController {
-  constructor(private readonly compliance: ComplianceService) {}
+  constructor(
+    private readonly compliance: ComplianceService,
+    private readonly auditReview: AuditReviewService,
+  ) {}
 
   @RequirePermissions(PERMISSIONS.AUDIT_READ)
   @Get('audit')
@@ -239,7 +258,41 @@ class ComplianceController {
     const fromDate = from ? new Date(from) : new Date(Date.now() - 30 * 864e5);
     return this.compliance.qualityIndicators(fromDate, toDate);
   }
+
+  /**
+   * Periodic review of the audit trail (Annex 11 section 9).
+   *
+   * The trail being immutable proves nothing was altered; it does not prove
+   * anybody looked, and looking is the control.
+   */
+  @RequirePermissions(PERMISSIONS.AUDIT_READ)
+  @Get('audit-review/prepare')
+  prepareAuditReview(@Query('from') from: string, @Query('to') to: string) {
+    return this.auditReview.prepare(startOfDay(from, new Date(0)), endOfDay(to));
+  }
+
+  @RequirePermissions(PERMISSIONS.AUDIT_READ)
+  @Get('audit-review')
+  listAuditReviews() {
+    return this.auditReview.list();
+  }
+
+  /**
+   * AUDIT_VERIFY rather than AUDIT_READ: signing off that the trail was
+   * reviewed is an assertion about the system, not a lookup in it.
+   */
+  @RequirePermissions(PERMISSIONS.AUDIT_VERIFY)
+  @Post('audit-review')
+  recordAuditReview(@Body(zodPipe(auditReviewSchema)) body: z.infer<typeof auditReviewSchema>) {
+    return this.auditReview.record({
+      from: startOfDay(body.from, new Date(0)),
+      to: endOfDay(body.to),
+      findings: body.findings,
+      followUp: body.followUp,
+    });
+  }
 }
+
 
 /**
  * CSV export.
@@ -325,6 +378,6 @@ const attachment = (name: string) =>
 
 @Module({
   controllers: [ComplianceController, ExportController],
-  providers: [ComplianceService, ExportService],
+  providers: [ComplianceService, ExportService, AuditReviewService],
 })
 export class ComplianceModule {}

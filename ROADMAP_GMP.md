@@ -118,7 +118,7 @@ resolution, which is the thread they always pull.
 
 | # | Item | Why it matters | State |
 |---|---|---|---|
-| 3.1 | **Audit-trail review workflow** | The trail is viewable; regulators expect *periodic review* with a record that it was reviewed and by whom | ☐ To do |
+| 3.1 | **Audit-trail review workflow** | An immutable trail proves nothing was altered; it does not prove anybody looked | ✅ **Done** (Annex 11 §9) — a prepare step summarises the period by action and surfaces the classes a reviewer must justify (overrides, amendments, failed sign-ins, erasures). Recording captures the **sequence range** examined, not just dates, so a second person can re-read exactly what the first one did. A review of an empty period is refused, sign-off needs `audit:verify` rather than `audit:read`, and never having reviewed counts as overdue |
 | 3.2 | **Retention samples** | Register, storage location, quantity, retention period, disposal record | ☐ To do |
 | 3.3 | **Vendor qualification** | Approved vendor list, qualification status and expiry, and a gate on receiving from an unapproved source | ☐ To do |
 | 3.4 | **Method validation records** | Validation status per method, parameters, and revalidation triggers | ☐ To do |

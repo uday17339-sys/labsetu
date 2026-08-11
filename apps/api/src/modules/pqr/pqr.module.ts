@@ -3,6 +3,7 @@ import { BadRequestException } from '@nestjs/common';
 import { PERMISSIONS } from '@labsetu/contracts';
 import { PqrService } from './pqr.service';
 import { RequirePermissions } from '../../common/rbac/permissions.decorator';
+import { endOfDay, startOfDay } from '../../common/dates/range';
 
 @Controller({ path: 'pqr', version: '1' })
 export class PqrController {
@@ -26,10 +27,9 @@ export class PqrController {
     @Query('from') from?: string,
     @Query('to') to?: string,
   ) {
-    const toDate = to ? new Date(to) : new Date();
-    const fromDate = from
-      ? new Date(from)
-      : new Date(toDate.getTime() - 365 * 864e5);
+    // A date-only bound means the whole of that day; see common/dates/range.
+    const toDate = endOfDay(to);
+    const fromDate = startOfDay(from, new Date(toDate.getTime() - 365 * 864e5));
 
     if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
       throw new BadRequestException('from and to must be dates.');

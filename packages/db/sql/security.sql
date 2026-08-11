@@ -202,7 +202,10 @@ DECLARE
     -- Environmental monitoring names which rooms a site runs, to what grade,
     -- and how often they fail. Commercially sensitive and inspection-relevant
     -- in equal measure.
-    'em_location', 'em_reading'
+    'em_location', 'em_reading',
+    -- Audit reviews name who examined what; retention samples and the approved
+    -- vendor list are both commercially sensitive and inspection-relevant.
+    'audit_review', 'retention_sample', 'vendor'
   ];
   tenant_col text;
 BEGIN

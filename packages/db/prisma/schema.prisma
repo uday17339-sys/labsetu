@@ -1935,6 +1935,7 @@ model MaterialBatch {
   dispositions     BatchDisposition[]
   deviations       Deviation[]
   stabilityStudies StabilityStudy[]
+  retentionSamples RetentionSample[]
   investigations   OosInvestigation[]
   certificates     CertificateOfAnalysis[]
 
@@ -2740,4 +2741,135 @@ enum EmVerdict {
   ALERT
   /// Above action. A breach requiring investigation.
   ACTION
+}
+
+// =============================================================================
+// AUDIT-TRAIL REVIEW, RETENTION SAMPLES, VENDOR QUALIFICATION
+// =============================================================================
+
+/// A record that somebody read the audit trail for a period, and what they found.
+///
+/// Annex 11 §9 and Part 11 both expect audit trails to be *reviewed*, not merely
+/// kept. The trail being immutable proves nothing was altered; it does not prove
+/// anybody looked. Reviewing is the control, and this is its evidence.
+///
+/// Carries the sequence range examined rather than only dates: the trail is
+/// hash-chained by sequence, so naming the range makes the review reproducible —
+/// a second person can re-read exactly what the first one read.
+model AuditReview {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+
+  periodFrom      DateTime
+  periodTo        DateTime
+  /// Inclusive sequence bounds actually examined.
+  fromSeq         BigInt
+  toSeq           BigInt
+  entriesReviewed Int
+
+  reviewedBy String   @db.Uuid
+  reviewedAt DateTime @default(now())
+
+  /// What was looked for and what was concluded. Required: a review with no
+  /// findings recorded cannot be told apart from one that never happened.
+  findings String
+  /// Anything that became a deviation or CAPA as a result.
+  followUp String?
+
+  @@index([tenantId, reviewedAt])
+  @@map("audit_review")
+}
+
+/// Retention (control) samples.
+///
+/// Schedule M requires a portion of each batch to be kept for the shelf life
+/// plus a year, and to be available for examination. The register answers the
+/// two questions actually asked: have we got one, and where is it.
+model RetentionSample {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  batchId  String @db.Uuid
+
+  retentionNumber String
+  quantity        Decimal @db.Decimal(12, 3)
+  unit            String
+  containerType   String?
+  location        String
+
+  collectedAt DateTime
+  collectedBy String   @db.Uuid
+  /// Shelf life plus one year, by default. Stored rather than derived so that
+  /// changing a material's shelf life does not silently re-date samples already
+  /// on the shelf.
+  retainUntil DateTime
+
+  status RetentionStatus @default(HELD)
+
+  /// Destruction is the end of the record, and it needs two things an inspector
+  /// asks for: authority and a witness.
+  destroyedAt    DateTime?
+  destroyedBy    String?   @db.Uuid
+  destructionRef String?
+  witnessedBy    String?   @db.Uuid
+
+  /// Where a sample was drawn on for an investigation or a complaint, so the
+  /// quantity remaining makes sense.
+  withdrawnNote String?
+
+  batch MaterialBatch @relation(fields: [batchId], references: [id])
+
+  @@unique([tenantId, retentionNumber])
+  @@index([tenantId, status, retainUntil])
+  @@map("retention_sample")
+}
+
+enum RetentionStatus {
+  HELD
+  /// Partly consumed by an investigation, complaint or stability query.
+  WITHDRAWN
+  /// Past its retention date and destroyed, with authority recorded.
+  DESTROYED
+}
+
+/// An approved supplier, and the qualification behind the approval.
+///
+/// The point of the record is the gate: material may not be received from a
+/// vendor whose qualification has lapsed. A vendor list that nothing checks is
+/// a document, not a control.
+model Vendor {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  code     String
+  name     String
+
+  address String?
+  gstin   String?
+  contact String?
+
+  status             VendorStatus @default(PENDING)
+  /// What the approval rests on: audit, questionnaire, three-batch assessment.
+  qualificationBasis String?
+  qualifiedAt        DateTime?
+  qualifiedBy        String?      @db.Uuid
+  /// Requalification falls due here. Past it, the vendor is not approved.
+  requalifyBy        DateTime?
+
+  suspendedReason String?
+  notes           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, code])
+  @@index([tenantId, status])
+  @@map("vendor")
+}
+
+enum VendorStatus {
+  /// Known, not yet qualified. Cannot supply.
+  PENDING
+  APPROVED
+  /// Temporarily stopped, e.g. pending an investigation.
+  SUSPENDED
+  DISQUALIFIED
 }
