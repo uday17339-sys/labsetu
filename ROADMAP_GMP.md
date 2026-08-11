@@ -108,7 +108,7 @@ resolution, which is the thread they always pull.
 | # | Item | Why it matters | State |
 |---|---|---|---|
 | 2.1 | **Stability studies** | A shelf life is a claim; the study is the evidence for it | ✅ **Done** (ICH Q1A) — protocols carry condition, study type and their own timepoint schedule so bracketing designs work; starting a study schedules every pull up front, so a timepoint is visible weeks ahead rather than discovered afterwards. A missed pull is recorded with a reason and never deleted — tidying it away makes an incomplete study look complete. Month arithmetic is calendar-correct and clamped, so a 36-month schedule does not drift off its day |
-| 2.2 | **Environmental monitoring** | Sampling locations, grades, alert/action limits, trending, excursion handling for cleanrooms and water systems | ☐ To do |
+| 2.2 | **Environmental monitoring** | Cleanroom and utility monitoring with a real early-warning tier | ✅ **Done** — two-tier limits throughout: an ALERT is a trend signal and raises nothing, an ACTION is a breach and raises a deviation automatically, in the same transaction, categorised ENVIRONMENTAL so it lands where an investigator looks rather than only in the EM log. Configuring an alert at the action limit is refused — that is not an early warning. Verdicts are stored at entry, never recomputed, so tightening a limit cannot retrospectively turn a compliant reading into an excursion. Excursion rate reports by grade |
 | 2.3 | **Product Quality Review (PQR/APR)** | Annual review per product: batches made, rejected, deviations, OOS, changes, trends. Explicitly required by Schedule M | ☐ To do |
 
 ### P3 — Completeness and evidence

@@ -23,6 +23,7 @@ import { ProblemDetailFilter } from './common/filters/problem-detail.filter';
 import { CONFIG, type AppConfig } from './config/configuration';
 import { QualityModule } from './modules/quality/quality.module';
 import { StabilityModule } from './modules/stability/stability.module';
+import { EnvironmentalModule } from './modules/environmental/environmental.module';
 
 @Module({
   imports: [
@@ -45,6 +46,7 @@ import { StabilityModule } from './modules/stability/stability.module';
     AuthModule,
     QualityModule,
     StabilityModule,
+    EnvironmentalModule,
     CatalogModule,
     PatientsModule,
     WorkflowModule,

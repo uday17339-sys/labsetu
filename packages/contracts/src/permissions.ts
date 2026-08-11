@@ -135,6 +135,11 @@ export const PERMISSIONS = {
   CHANGE_APPROVE: 'change:approve',
   STABILITY_READ: 'stability:read',
   STABILITY_MANAGE: 'stability:manage',
+  EM_READ: 'em:read',
+  /// Recording a reading is separate from configuring the programme: an
+  /// operator takes plates, a QA lead sets what the limits are.
+  EM_RECORD: 'em:record',
+  EM_MANAGE: 'em:manage',
   /// Open, progress and close an out-of-specification investigation.
   OOS_MANAGE: 'oos:manage',
   /// Issue a certificate of analysis for a released batch.
@@ -357,6 +362,9 @@ export const DEFAULT_ROLES: Record<
     description:
       'Samples batches and performs the testing against specification. Produces results; does not decide their consequence for the batch.',
     permissions: [
+      PERMISSIONS.EM_READ,
+      PERMISSIONS.EM_RECORD,
+
       PERMISSIONS.STABILITY_READ,
       PERMISSIONS.STABILITY_MANAGE,
 
@@ -393,6 +401,10 @@ export const DEFAULT_ROLES: Record<
     description:
       'Approves specifications, investigates out-of-specification results, and releases or rejects batches. Independent of the analyst who produced the result.',
     permissions: [
+      PERMISSIONS.EM_READ,
+      PERMISSIONS.EM_RECORD,
+      PERMISSIONS.EM_MANAGE,
+
       PERMISSIONS.STABILITY_READ,
       PERMISSIONS.STABILITY_MANAGE,
 
@@ -446,6 +458,8 @@ export const DEFAULT_ROLES: Record<
     name: 'Auditor',
     description: 'Read-only access including the full audit trail. Changes nothing.',
     permissions: [
+      PERMISSIONS.EM_READ,
+
       PERMISSIONS.STABILITY_READ,
 
       PERMISSIONS.DEVIATION_READ,

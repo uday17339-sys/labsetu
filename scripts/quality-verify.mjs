@@ -591,6 +591,140 @@ async function main() {
       : bad(`${verb} audited`, JSON.stringify(entries.body).slice(0, 100));
   }
 
+  // ================================================ environmental monitoring
+  section('Environmental monitoring');
+
+  const locations = await api('GET', '/environmental/locations', { token: qa.accessToken });
+  locations.status === 200 && locations.body.length > 0
+    ? ok('the monitoring programme is configured', `${locations.body.length} points`)
+    : bad('EM locations', JSON.stringify(locations.body).slice(0, 120));
+
+  const point = (locations.body ?? []).find((l) => l.actionLimit != null && l.alertLimit != null);
+  point && point.alertLimit < point.actionLimit
+    ? ok('limits are two-tier', `alert ${point.alertLimit} < action ${point.actionLimit} ${point.unit}`)
+    : bad('two-tier limits', JSON.stringify(point).slice(0, 120));
+
+  // A single threshold throws away the early warning, so an alert that fires
+  // at the action limit is refused at configuration time.
+  const badLimits = await api('POST', '/environmental/locations', {
+    token: qa.accessToken,
+    body: {
+      code: `EM/BAD/${Date.now().toString().slice(-6)}`,
+      name: 'A point whose alert fires at the action limit',
+      grade: 'C',
+      monitoringType: 'SURFACE',
+      unit: 'cfu/plate',
+      alertLimit: 25,
+      actionLimit: 25,
+    },
+  });
+  badLimits.status >= 400
+    ? ok('an alert at the action limit is REFUSED', 'that is not an early warning')
+    : bad('alert below action enforced', `${badLimits.status}`);
+
+  // --- classification ------------------------------------------------------
+  const inLimit = await api('POST', '/environmental/readings', {
+    token: qc.accessToken,
+    body: {
+      locationId: point.id,
+      value: Math.max(0, point.alertLimit - 10),
+      sampledAt: new Date().toISOString().slice(0, 10),
+      shift: 'A',
+    },
+  });
+  inLimit.body?.verdict === 'IN_LIMIT'
+    ? ok('a normal reading classifies as in limit', `${inLimit.body.value} ${inLimit.body.unit}`)
+    : bad('in-limit classification', JSON.stringify(inLimit.body).slice(0, 120));
+
+  const alerting = await api('POST', '/environmental/readings', {
+    token: qc.accessToken,
+    body: {
+      locationId: point.id,
+      value: point.alertLimit + 1,
+      sampledAt: new Date().toISOString().slice(0, 10),
+      shift: 'A',
+    },
+  });
+  alerting.body?.verdict === 'ALERT'
+    ? ok('above alert but below action is an ALERT', 'a trend signal, not a breach')
+    : bad('alert classification', JSON.stringify(alerting.body).slice(0, 120));
+
+  alerting.body?.deviationNumber == null
+    ? ok('an alert does NOT raise a deviation', 'the early warning stays a warning')
+    : bad('alert raises no deviation', `raised ${alerting.body.deviationNumber}`);
+
+  // THE CONTROL: an action breach raises the deviation itself.
+  const breach = await api('POST', '/environmental/readings', {
+    token: qc.accessToken,
+    body: {
+      locationId: point.id,
+      value: point.actionLimit + 25,
+      sampledAt: new Date().toISOString().slice(0, 10),
+      shift: 'B',
+      note: 'Plate read after the door interlock was found taped open.',
+    },
+  });
+  breach.body?.verdict === 'ACTION'
+    ? ok('above the action limit is an ACTION breach', `${breach.body.value} ${breach.body.unit}`)
+    : bad('action classification', JSON.stringify(breach.body).slice(0, 120));
+
+  breach.body?.deviationNumber
+    ? ok('an action breach raises a deviation automatically', breach.body.deviationNumber)
+    : bad('automatic deviation on breach', 'no deviation raised');
+
+  // And it lands in the deviation register, where an investigator actually
+  // looks — not only in the EM log.
+  const devs = await api('GET', '/quality/deviations', { token: qa.accessToken });
+  (devs.body ?? []).some((x) => x.deviationNumber === breach.body?.deviationNumber)
+    ? ok('the excursion appears in the deviation register', 'not only in the EM log')
+    : bad('excursion visible to an investigator', 'not in the register');
+
+  const envDev = (devs.body ?? []).find((x) => x.deviationNumber === breach.body?.deviationNumber);
+  envDev?.category === 'ENVIRONMENTAL'
+    ? ok('it is categorised as environmental', envDev.category)
+    : bad('excursion categorised', `category=${envDev?.category}`);
+
+  // --- trend ---------------------------------------------------------------
+  const summary = await api('GET', '/environmental/summary?days=120', { token: qa.accessToken });
+  summary.status === 200 && summary.body.totalReadings > 0
+    ? ok('excursion rate is reportable by grade', `${summary.body.totalReadings} readings`)
+    : bad('EM summary', JSON.stringify(summary.body).slice(0, 120));
+
+  (summary.body?.byGrade ?? []).every((g) => typeof g.excursionRatePct === 'number')
+    ? ok('each grade carries its excursion rate', summary.body.byGrade.map((g) => `${g.grade}:${g.excursionRatePct}%`).join(' '))
+    : bad('per-grade rate', JSON.stringify(summary.body?.byGrade).slice(0, 120));
+
+  const future = await api('POST', '/environmental/readings', {
+    token: qc.accessToken,
+    body: {
+      locationId: point.id,
+      value: 1,
+      sampledAt: new Date(Date.now() + 5 * 864e5).toISOString().slice(0, 10),
+    },
+  });
+  future.status >= 400
+    ? ok('a reading dated in the future is REFUSED')
+    : bad('future reading refused', `${future.status}`);
+
+  const auditorRecord = await api('POST', '/environmental/readings', {
+    token: auditor.accessToken,
+    body: {
+      locationId: point.id,
+      value: 1,
+      sampledAt: new Date().toISOString().slice(0, 10),
+    },
+  });
+  auditorRecord.status === 403
+    ? ok('the auditor cannot record a reading', '403 — read-only')
+    : bad('EM recording permissioned', `${auditorRecord.status}`);
+
+  const emAudit = await api('GET', '/compliance/audit?action=EM_READING_RECORDED&limit=5', {
+    token: admin.accessToken,
+  });
+  (emAudit.body?.items ?? []).length > 0
+    ? ok('readings are audited as their own verb', 'EM_READING_RECORDED')
+    : bad('EM audited', JSON.stringify(emAudit.body).slice(0, 110));
+
   // =========================================================== audit trail
   section('The thread is in the audit trail');
 

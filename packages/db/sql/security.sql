@@ -198,7 +198,11 @@ DECLARE
     'deviation', 'capa_action', 'change_control',
     -- Stability data supports the expiry date printed on cartons already in the
     -- market. It names what a competitor makes and how it behaves over time.
-    'stability_protocol', 'stability_study', 'stability_pull'
+    'stability_protocol', 'stability_study', 'stability_pull',
+    -- Environmental monitoring names which rooms a site runs, to what grade,
+    -- and how often they fail. Commercially sensitive and inspection-relevant
+    -- in equal measure.
+    'em_location', 'em_reading'
   ];
   tenant_col text;
 BEGIN

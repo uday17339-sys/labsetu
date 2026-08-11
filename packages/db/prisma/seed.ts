@@ -1934,6 +1934,112 @@ async function seedWorkflow(): Promise<void> {
         );
       }
 
+      // -------------------------------------------- environmental monitoring
+      //
+      // A modest but real programme: the sampling room and corridor an oral
+      // solid dosage plant actually monitors, plus purified water. Limits are
+      // two-tier throughout — the alert is what gives anyone a chance to act
+      // before the action limit is breached.
+      const emPoints = [
+        {
+          code: 'EM/SR/AIR-01',
+          name: 'Sampling booth — active air',
+          grade: 'C',
+          type: 'VIABLE_AIR',
+          unit: 'cfu/m³',
+          alert: 50,
+          action: 100,
+          room: 'Sampling Booth SB-1',
+          freq: 7,
+        },
+        {
+          code: 'EM/SR/SURF-01',
+          name: 'Sampling booth — working surface',
+          grade: 'C',
+          type: 'SURFACE',
+          unit: 'cfu/plate',
+          alert: 15,
+          action: 25,
+          room: 'Sampling Booth SB-1',
+          freq: 7,
+        },
+        {
+          code: 'EM/COR/AIR-02',
+          name: 'Dispensing corridor — settle plate',
+          grade: 'D',
+          type: 'VIABLE_AIR',
+          unit: 'cfu/4h',
+          alert: 100,
+          action: 200,
+          room: 'Corridor C-2',
+          freq: 14,
+        },
+        {
+          code: 'EM/PW/LOOP-01',
+          name: 'Purified water — return loop',
+          grade: 'Utility',
+          type: 'UTILITY_WATER',
+          unit: 'cfu/mL',
+          alert: 50,
+          action: 100,
+          room: 'PW Generation Room',
+          freq: 7,
+        },
+      ] as const;
+
+      let emReadings = 0;
+      let emExcursions = 0;
+
+      for (const pt of emPoints) {
+        const loc = await tx.emLocation.create({
+          data: {
+            tenantId: TENANT_ID,
+            code: pt.code,
+            name: pt.name,
+            grade: pt.grade,
+            monitoringType: pt.type as never,
+            unit: pt.unit,
+            alertLimit: d(pt.alert),
+            actionLimit: d(pt.action),
+            roomRef: pt.room,
+            frequencyDays: pt.freq,
+          },
+        });
+
+        // Twelve weeks of history. Mostly in limit, with one alert-level drift
+        // on the water loop — the pattern a trend report is supposed to catch
+        // before it becomes an action breach.
+        for (let week = 12; week >= 1; week--) {
+          const drifting = pt.code === 'EM/PW/LOOP-01' && week <= 3;
+          const base = drifting ? pt.alert + 8 : Math.round(pt.alert * 0.35);
+          const value = base + ((week * 7) % 9);
+          const verdict =
+            value > pt.action ? 'ACTION' : value > pt.alert ? 'ALERT' : 'IN_LIMIT';
+          if (verdict !== 'IN_LIMIT') emExcursions++;
+
+          await tx.emReading.create({
+            data: {
+              tenantId: TENANT_ID,
+              locationId: loc.id,
+              sampledAt: daysAgo(week * 7),
+              value: d(value),
+              unit: pt.unit,
+              verdict: verdict as never,
+              shift: week % 2 === 0 ? 'A' : 'B',
+              performedBy: analyst2.id,
+              note: drifting
+                ? 'Counts trending up on the return loop; sanitisation cycle brought forward.'
+                : null,
+            },
+          });
+          emReadings++;
+        }
+      }
+
+      console.log(
+        `    environment  ${emPoints.length} monitoring points · ${emReadings} readings · ${emExcursions} above alert`,
+      );
+
       console.log(`    workflow     ${orderSeq} AR numbers, ${reqSeq} sampling requests`);
       console.log('    dispositions 1 approved · 1 rejected (OOS) · 1 approved-with-deviation');
       console.log('    oos          OOS/26/0007 closed · OOS/26/0012 OPEN (dissolution, Phase I)');

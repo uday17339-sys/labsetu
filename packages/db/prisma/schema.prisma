@@ -2635,3 +2635,109 @@ enum PullStatus {
   /// Deliberately not taken, with a reason, e.g. the study was discontinued.
   CANCELLED
 }
+
+// =============================================================================
+// ENVIRONMENTAL MONITORING
+// =============================================================================
+//
+// Cleanroom and utility monitoring under Schedule M / EU GMP Annex 1. The shape
+// that matters is the two-tier limit: an ALERT is a trend signal, an ACTION is a
+// breach requiring investigation. Systems that collapse them into one threshold
+// lose the early warning, which is the only part that prevents anything.
+//
+// Results are recorded against a location and a date, not against a batch. The
+// link to product is made afterwards, by asking which batches were open in that
+// room during the excursion window — which is why the reading carries its own
+// timestamp rather than borrowing a batch's.
+
+model EmLocation {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+  code     String
+  name     String
+
+  /// A, B, C or D under Annex 1. Free text rather than an enum because Indian
+  /// sites also run ISO-class and unclassified utility points on the same
+  /// programme, and forcing them into a grade would be a lie.
+  grade          String
+  roomRef        String?
+  monitoringType EmMonitoringType
+
+  /// Two-tier by design. Alert is the trend signal; action is the breach.
+  alertLimit  Decimal? @db.Decimal(12, 3)
+  actionLimit Decimal? @db.Decimal(12, 3)
+  unit        String
+
+  /// How often the point is due. Used to show a programme falling behind
+  /// rather than to schedule automatically — EM frequency is a judgement that
+  /// changes with risk, and a fixed scheduler fights the people running it.
+  frequencyDays Int?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  readings EmReading[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, grade])
+  @@map("em_location")
+}
+
+enum EmMonitoringType {
+  /// Settle plates, active air sampling.
+  VIABLE_AIR
+  /// Particle counts, 0.5 µm and 5.0 µm.
+  NON_VIABLE_PARTICLE
+  SURFACE
+  PERSONNEL
+  /// Purified water, WFI, compressed gases.
+  UTILITY_WATER
+  COMPRESSED_GAS
+  TEMPERATURE_HUMIDITY
+  DIFFERENTIAL_PRESSURE
+}
+
+model EmReading {
+  id         String @id @default(uuid()) @db.Uuid
+  tenantId   String @db.Uuid
+  locationId String @db.Uuid
+
+  sampledAt DateTime
+  value     Decimal  @db.Decimal(12, 3)
+  unit      String
+
+  /// Computed at entry against the limits in force at that moment, then stored.
+  /// Recomputing later against changed limits would rewrite history: a reading
+  /// that was in specification when taken must not become an excursion because
+  /// somebody tightened the limit afterwards.
+  verdict EmVerdict
+
+  /// Which shift, which operator, what was happening in the room. An excursion
+  /// is investigated from this, and "we don't know who was in there" is the
+  /// answer that turns a deviation into a finding.
+  shift       String?
+  performedBy String  @db.Uuid
+  note        String?
+
+  /// The deviation raised for an action-limit breach. Not optional in practice
+  /// but nullable in the schema, because the reading is recorded first and the
+  /// deviation follows within the same transaction.
+  deviationId String? @db.Uuid
+
+  createdAt DateTime @default(now())
+
+  location EmLocation @relation(fields: [locationId], references: [id])
+
+  @@index([tenantId, locationId, sampledAt])
+  @@index([tenantId, verdict, sampledAt])
+  @@map("em_reading")
+}
+
+enum EmVerdict {
+  IN_LIMIT
+  /// Above alert, below action. A trend signal, not a breach.
+  ALERT
+  /// Above action. A breach requiring investigation.
+  ACTION
+}
